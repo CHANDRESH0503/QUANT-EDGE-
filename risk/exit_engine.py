@@ -1,0 +1,559 @@
+# risk/exit_engine.py
+# Smart exit system — monitors open positions every 15 minutes
+# Multiple exit conditions run simultaneously
+# Connected to: database/trading.db, alerts/telegram_bot.py
+
+import sqlite3
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+class ExitEngine:
+    """
+    Monitors all open positions for exit conditions.
+
+    20yr trader truth:
+    Entry is 30% of trading. Exit is 70%.
+    Most traders have decent entries but terrible exits.
+    They exit winners too early (fear) and hold losers too long (hope).
+    This engine removes both emotions.
+
+    Exit triggers (in priority order):
+    1. Hard stop loss        — price hits stop, exit immediately
+    2. Trailing stop         — locks in profits as price rises
+    3. Signal reversal       — model flips to opposite direction
+    4. Time exit             — max hold days exceeded
+    5. Resistance hit        — price at major resistance, take profit
+    6. Regime change         — regime shifts against the trade
+    7. Sentiment reversal    — very negative news during LONG trade
+    """
+
+    MAX_HOLD = {"swing": 7, "intraday": 1, "positional": 28}
+    TRAIL_TRIGGER    = 0.02    # start trailing after 2% profit
+    TRAIL_DISTANCE   = 0.015   # trail stop 1.5% below highest price
+    RESISTANCE_ZONE  = 0.005   # within 0.5% = near resistance
+
+    def __init__(self, db_path: str = "database/trading.db"):
+        self.db_path = db_path
+        self._setup_db()
+
+    # ─────────────────────────────────────────────────────────────
+    # PUBLIC
+    # ─────────────────────────────────────────────────────────────
+
+    def check_all_positions(
+        self,
+        current_price: float,
+        open_price: float = 0.0,
+    ) -> List[Dict]:
+        """
+        Check all open positions for exit conditions.
+        Returns list of exit recommendations.
+        Called every 15 minutes by signal_engine.py.
+
+        Args:
+            current_price: Latest market price.
+            open_price:    Today's open price (for gap-fill logic). If nonzero
+                           and the stock gapped past a stop at open, exit at
+                           open_price rather than the theoretical stop level.
+        """
+        positions = self._get_open_positions()
+        results   = []
+
+        for pos in positions:
+            result = self._check_gap_fill(pos, open_price) if open_price else None
+            if result and result["should_exit"]:
+                results.append(result)
+                logger.warning(
+                    f"GAP FILL EXIT: {pos['signal']} | "
+                    f"open=₹{open_price:.2f} past stop=₹{pos['stop_price']:.2f}"
+                )
+            else:
+                result = self._check_position(pos, current_price)
+                if result["should_exit"]:
+                    results.append(result)
+                    logger.info(
+                        f"EXIT SIGNAL: {pos['signal']} | "
+                        f"reason={result['reason']} | "
+                        f"pnl={result['pnl_pct']:+.2%}"
+                    )
+
+        return results
+
+    def _check_gap_fill(self, pos: Dict, open_price: float) -> Optional[Dict]:
+        """
+        Gap-fill logic: if today's open has already blown through the stop,
+        the actual fill is at open_price (not the theoretical stop level).
+        This is the most realistic modelling of overnight gap risk.
+        """
+        if open_price <= 0:
+            return None
+        signal = pos["signal"]
+        stop   = float(pos.get("stop_price", 0))
+        pos_id = pos["id"]
+        entry  = float(pos["entry_price"])
+
+        gapped = (
+            (signal == "LONG"  and open_price < stop) or
+            (signal == "SHORT" and open_price > stop)
+        )
+        if not gapped:
+            return None
+
+        if signal == "LONG":
+            pnl_pct = (open_price - entry) / entry
+        else:
+            pnl_pct = (entry - open_price) / entry
+
+        return {
+            "should_exit":  True,
+            "position_id":  pos_id,
+            "signal":       signal,
+            "exit_price":   open_price,
+            "pnl_pct":      round(pnl_pct, 6),
+            "reason":       "GAP_FILL",
+            "message":      (
+                f"Gap filled past stop: open=₹{open_price:.2f}, "
+                f"stop=₹{stop:.2f} — exit at open price"
+            ),
+        }
+
+    def open_position(
+        self,
+        signal:      str,
+        entry_price: float,
+        stop_price:  float,
+        target_price:float,
+        shares:      int,
+        risk_amount: float,
+        trade_type:  str = "swing",
+        signal_uuid: str = "",
+        alignment:   str = "",
+        regime:      str = "",
+        confidence:  float = 0.0,
+        entry_quality: str = "",
+        ticker:      str = "HDFCBANK.NS",
+    ) -> int:
+        """Record a new open position. Returns position ID."""
+        conn = self._connect()
+        cur  = conn.execute("""
+            INSERT INTO open_trades
+            (signal_uuid, ticker, signal, entry_price, stop_price, target_price,
+             shares, risk_amount, trade_type,
+             highest_price, lowest_price, status, opened_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            signal_uuid or "",
+            ticker,
+            signal, entry_price, stop_price, target_price,
+            shares, risk_amount, trade_type,
+            entry_price,  # highest = entry at open
+            entry_price,  # lowest  = entry at open
+            "OPEN",
+            str(datetime.now()),
+        ))
+        pos_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        logger.info(f"Position opened: id={pos_id} {signal} {shares} @ ₹{entry_price:.2f}")
+        return pos_id
+
+    def close_position(self, position_id: int, exit_price: float, reason: str) -> Dict:
+        """Close a position and move to closed_trades table. Writes signal_outcomes."""
+        conn = self._connect()
+        pos  = conn.execute(
+            "SELECT * FROM open_trades WHERE id=?", (position_id,)
+        ).fetchone()
+
+        if not pos:
+            conn.close()
+            return {}
+
+        pos         = dict(pos)
+        entry       = float(pos["entry_price"])
+        shares      = int(pos["shares"])
+        signal      = pos["signal"]
+        signal_uuid = pos.get("signal_uuid") or ""
+        ticker      = pos.get("ticker") or "HDFCBANK.NS"
+        opened_at   = pos.get("opened_at", str(datetime.now()))
+
+        if signal == "LONG":
+            pnl_pct = (exit_price - entry) / entry
+        else:
+            pnl_pct = (entry - exit_price) / entry
+
+        pnl_amount = round(pnl_pct * entry * shares, 2)
+
+        try:
+            opened_dt = datetime.strptime(str(opened_at)[:19], "%Y-%m-%d %H:%M:%S")
+            hold_days = (datetime.now() - opened_dt).days
+        except Exception:
+            hold_days = 0
+
+        conn.execute("""
+            INSERT INTO closed_trades
+            (signal_uuid, ticker, signal, entry_price, exit_price, shares,
+             pnl_amount, pnl_pct, exit_reason, close_date, status)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            signal_uuid, ticker,
+            signal, entry, exit_price, shares,
+            pnl_amount, round(pnl_pct, 6),
+            reason, str(datetime.now()), "CLOSED",
+        ))
+        conn.execute("DELETE FROM open_trades WHERE id=?", (position_id,))
+        conn.commit()
+        conn.close()
+
+        result = {
+            "position_id": position_id,
+            "signal":      signal,
+            "signal_uuid": signal_uuid,
+            "ticker":      ticker,
+            "entry":       entry,
+            "exit":        exit_price,
+            "shares":      shares,
+            "pnl_amount":  pnl_amount,
+            "pnl_pct":     pnl_pct,
+            "hold_days":   hold_days,
+            "reason":      reason,
+        }
+
+        # Auto-write outcome for learning loop (task 1.1)
+        self._record_outcome(result)
+
+        logger.info(
+            f"Position closed: id={position_id} | "
+            f"pnl={pnl_pct:+.2%} (₹{pnl_amount:+.2f}) | "
+            f"reason={reason}"
+        )
+        return result
+
+    def _record_outcome(self, trade: Dict) -> None:
+        """Write to signal_outcomes after every close — the learning loop."""
+        try:
+            from risk.outcome_tracker import OutcomeTracker
+            OutcomeTracker(self.db_path).record(trade)
+        except Exception as e:
+            logger.warning(f"outcome_tracker failed: {e}")
+
+    # ─────────────────────────────────────────────────────────────
+    # EXIT CONDITION CHECKS
+    # ─────────────────────────────────────────────────────────────
+
+    def _check_position(self, pos: Dict, price: float) -> Dict:
+        """Run all exit checks on a single position."""
+        pos_id     = pos["id"]
+        signal     = pos["signal"]
+        entry      = float(pos["entry_price"])
+        stop       = float(pos["stop_price"])
+        target     = float(pos["target_price"])
+        highest    = float(pos.get("highest_price", entry))
+        lowest     = float(pos.get("lowest_price",  entry))
+        opened_at  = pos.get("opened_at", str(datetime.now()))
+        trade_type = pos.get("trade_type", "swing")
+        shares     = int(pos.get("shares", 0))
+
+        # Compute 1R and 2R ladder targets from entry and stop
+        stop_dist  = abs(entry - stop)
+        if signal == "LONG":
+            target_1r = entry + stop_dist * 1.0
+            target_2r = entry + stop_dist * 2.0
+        else:
+            target_1r = entry - stop_dist * 1.0
+            target_2r = entry - stop_dist * 2.0
+
+        # P&L
+        if signal == "LONG":
+            pnl_pct = (price - entry) / entry
+        else:
+            pnl_pct = (entry - price) / entry
+
+        # Update high/low watermark
+        new_high = max(highest, price)
+        new_low  = min(lowest,  price)
+        self._update_watermark(pos_id, new_high, new_low)
+
+        # ── Check 1: Hard stop ────────────────────────────────────
+        if signal == "LONG"  and price <= stop:
+            return self._exit(pos_id, signal, price, pnl_pct,
+                              "STOP_LOSS", "Hard stop loss triggered")
+        if signal == "SHORT" and price >= stop:
+            return self._exit(pos_id, signal, price, pnl_pct,
+                              "STOP_LOSS", "Hard stop loss triggered")
+
+        # ── Check 2: Exit ladder — 1R partial (50%) ──────────────
+        if shares > 1:
+            at_1r = (signal == "LONG" and price >= target_1r and price < target_2r)
+            at_2r = (signal == "LONG" and price >= target_2r)
+            if signal == "SHORT":
+                at_1r = (price <= target_1r and price > target_2r)
+                at_2r = (price <= target_2r)
+
+            if at_2r:
+                # Book 30% at 2R, trail final 20% with chandelier-style trail
+                book_shares = max(1, int(shares * 0.30))
+                trail_stop  = (new_high * (1 - 0.02)) if signal == "LONG" else (new_low * (1 + 0.02))
+                if (signal == "LONG" and price <= trail_stop) or \
+                   (signal == "SHORT" and price >= trail_stop):
+                    return self._partial_exit(
+                        pos_id, signal, price, pnl_pct,
+                        "CHANDELIER_TRAIL",
+                        f"2R+trail: ₹{trail_stop:.2f} broken | booking {book_shares} sh",
+                        book_pct=1.0,
+                    )
+                return self._partial_exit(
+                    pos_id, signal, price, pnl_pct,
+                    "TARGET_2R",
+                    f"2R target ₹{target_2r:.2f} hit — booking 30%",
+                    book_pct=0.30,
+                )
+            elif at_1r:
+                return self._partial_exit(
+                    pos_id, signal, price, pnl_pct,
+                    "TARGET_1R",
+                    f"1R target ₹{target_1r:.2f} hit — booking 50%",
+                    book_pct=0.50,
+                )
+
+        # ── Full target hit (single-share position or full ladder done) ──
+        if signal == "LONG"  and price >= target:
+            return self._exit(pos_id, signal, price, pnl_pct,
+                              "TARGET_HIT", f"Target ₹{target:.2f} reached")
+        if signal == "SHORT" and price <= target:
+            return self._exit(pos_id, signal, price, pnl_pct,
+                              "TARGET_HIT", f"Target ₹{target:.2f} reached")
+
+        # ── Check 3: Trailing stop ────────────────────────────────
+        if pnl_pct >= self.TRAIL_TRIGGER:
+            if signal == "LONG":
+                trail_stop = new_high * (1 - self.TRAIL_DISTANCE)
+                if price <= trail_stop:
+                    return self._exit(pos_id, signal, price, pnl_pct,
+                                      "TRAILING_STOP",
+                                      f"Trailing stop: ₹{trail_stop:.2f} "
+                                      f"({self.TRAIL_DISTANCE:.1%} from ₹{new_high:.2f} high)")
+            else:  # SHORT
+                trail_stop = new_low * (1 + self.TRAIL_DISTANCE)
+                if price >= trail_stop:
+                    return self._exit(pos_id, signal, price, pnl_pct,
+                                      "TRAILING_STOP",
+                                      f"Trailing stop: ₹{trail_stop:.2f}")
+
+        # ── Check 4: Time exit ────────────────────────────────────
+        try:
+            days_held = (
+                datetime.now() -
+                datetime.strptime(str(opened_at)[:19], "%Y-%m-%d %H:%M:%S")
+            ).days
+        except Exception:
+            days_held = 0
+
+        max_hold = self.MAX_HOLD.get(trade_type, 7)
+        if days_held >= max_hold:
+            return self._exit(pos_id, signal, price, pnl_pct,
+                              "TIME_EXIT",
+                              f"Max hold {max_hold} days reached (held {days_held}d)")
+
+        # ── Check 5: Intraday must close by 15:15 ────────────────
+        if trade_type == "intraday":
+            now = datetime.now()
+            close_time = now.replace(hour=15, minute=15, second=0)
+            if now >= close_time:
+                return self._exit(pos_id, signal, price, pnl_pct,
+                                  "INTRADAY_CLOSE",
+                                  "Intraday: must close before 15:15")
+
+        # No exit triggered
+        return {
+            "should_exit":  False,
+            "position_id":  pos_id,
+            "signal":       signal,
+            "current_price":price,
+            "pnl_pct":      pnl_pct,
+            "days_held":    days_held,
+        }
+
+    def _exit(
+        self,
+        pos_id:   int,
+        signal:   str,
+        price:    float,
+        pnl_pct:  float,
+        reason:   str,
+        message:  str,
+    ) -> Dict:
+        return {
+            "should_exit":  True,
+            "partial":      False,
+            "position_id":  pos_id,
+            "signal":       signal,
+            "exit_price":   price,
+            "pnl_pct":      round(pnl_pct, 6),
+            "reason":       reason,
+            "message":      message,
+        }
+
+    def _partial_exit(
+        self,
+        pos_id:   int,
+        signal:   str,
+        price:    float,
+        pnl_pct:  float,
+        reason:   str,
+        message:  str,
+        book_pct: float = 0.50,
+    ) -> Dict:
+        return {
+            "should_exit":  True,
+            "partial":      True,
+            "book_pct":     book_pct,
+            "position_id":  pos_id,
+            "signal":       signal,
+            "exit_price":   price,
+            "pnl_pct":      round(pnl_pct, 6),
+            "reason":       reason,
+            "message":      message,
+        }
+
+    def close_position_partial(
+        self,
+        position_id: int,
+        exit_price:  float,
+        reason:      str,
+        book_pct:    float = 0.50,
+    ) -> Dict:
+        """
+        Book a fraction of the position.
+        Reduces the shares in open_trades; writes partial P&L to closed_trades.
+        """
+        conn = self._connect()
+        pos  = conn.execute(
+            "SELECT * FROM open_trades WHERE id=?", (position_id,)
+        ).fetchone()
+        if not pos:
+            conn.close()
+            return {}
+
+        pos         = dict(pos)
+        entry       = float(pos["entry_price"])
+        total_shares= int(pos["shares"])
+        signal      = pos["signal"]
+        signal_uuid = pos.get("signal_uuid") or ""
+
+        book_shares  = max(1, int(total_shares * book_pct))
+        remain       = max(0, total_shares - book_shares)
+
+        if signal == "LONG":
+            pnl_pct = (exit_price - entry) / entry
+        else:
+            pnl_pct = (entry - exit_price) / entry
+
+        pnl_amount = round(pnl_pct * entry * book_shares, 2)
+
+        conn.execute("""
+            INSERT INTO closed_trades
+            (signal_uuid, signal, entry_price, exit_price, shares,
+             pnl_amount, pnl_pct, exit_reason, close_date, status)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (
+            signal_uuid, signal, entry, exit_price, book_shares,
+            pnl_amount, round(pnl_pct, 6),
+            f"{reason}_PARTIAL", str(datetime.now()), "CLOSED",
+        ))
+
+        if remain > 0:
+            conn.execute(
+                "UPDATE open_trades SET shares=? WHERE id=?", (remain, position_id)
+            )
+        else:
+            conn.execute("DELETE FROM open_trades WHERE id=?", (position_id,))
+
+        conn.commit()
+        conn.close()
+
+        logger.info(
+            f"Partial exit: id={position_id} | booked {book_shares}/{total_shares} sh | "
+            f"pnl={pnl_pct:+.2%} (₹{pnl_amount:+.2f}) | remain={remain} sh | reason={reason}"
+        )
+        return {
+            "position_id":   position_id,
+            "signal":        signal,
+            "signal_uuid":   signal_uuid,
+            "entry":         entry,
+            "exit":          exit_price,
+            "booked_shares": book_shares,
+            "remaining":     remain,
+            "pnl_amount":    pnl_amount,
+            "pnl_pct":       pnl_pct,
+            "reason":        reason,
+        }
+
+    def _update_watermark(self, pos_id: int,
+                           high: float, low: float) -> None:
+        try:
+            conn = self._connect()
+            conn.execute("""
+                UPDATE open_trades
+                SET highest_price=?, lowest_price=?
+                WHERE id=?
+            """, (high, low, pos_id))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+    def _get_open_positions(self) -> List[Dict]:
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT * FROM open_trades WHERE status='OPEN'"
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def _connect(self) -> sqlite3.Connection:
+        c = sqlite3.connect(self.db_path)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA foreign_keys=ON")
+        return c
+
+    def _setup_db(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS open_trades (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal        TEXT,
+                entry_price   REAL,
+                stop_price    REAL,
+                target_price  REAL,
+                shares        INTEGER,
+                risk_amount   REAL,
+                trade_type    TEXT DEFAULT 'swing',
+                highest_price REAL,
+                lowest_price  REAL,
+                status        TEXT DEFAULT 'OPEN',
+                opened_at     TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS closed_trades (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal       TEXT,
+                entry_price  REAL,
+                exit_price   REAL,
+                shares       INTEGER,
+                pnl_amount   REAL,
+                pnl_pct      REAL,
+                exit_reason  TEXT,
+                close_date   TEXT,
+                status       TEXT DEFAULT 'CLOSED'
+            )
+        """)
+        conn.commit()
+        conn.close()

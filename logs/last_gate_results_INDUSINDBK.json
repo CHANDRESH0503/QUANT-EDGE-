@@ -1,0 +1,1 @@
+{"gate_results": {"pre_check": {"passed": true, "price": 910.1500244140625, "atr": 22.158244018843696}, "gate1": {"gate": 1, "passed": false, "reason": "CHOPPY_SIDEWAYS regime \u2014 all signals blocked", "regime": "CHOPPY_SIDEWAYS", "action": "Stay in cash. Wait for clear trend."}}, "regime": "CHOPPY_SIDEWAYS", "written_at": "2026-05-22 20:08:43.599413"}

@@ -1,0 +1,26 @@
+ICICI BANK 
+2026-05-20 07:10:31 [INFO] __main__:   regime      : CV=0.000 (5,918 samples)
+2026-05-20 07:10:31 [INFO] __main__:   swing       : CV=0.602 (1,515 samples)
+2026-05-20 07:10:31 [INFO] __main__:   positional  : CV=0.738 (270 samples)
+2026-05-20 07:10:31 [INFO] __main__:   intraday    : CV=0.790 (4,299 samples)
+
+KOTAK BANK
+2026-05-20 07:11:38 [INFO] __main__:   regime      : CV=0.000 (6,174 samples)
+2026-05-20 07:11:38 [INFO] __main__:   swing       : CV=0.625 (1,515 samples)
+2026-05-20 07:11:38 [INFO] __main__:   positional  : CV=0.791 (270 samples)
+2026-05-20 07:11:38 [INFO] __main__:   intraday    : CV=0.718 (4,299 samples)
+
+AXIS BANK
+2026-05-20 07:12:33 [INFO] __main__:   regime      : CV=0.000 (6,567 samples)
+2026-05-20 07:12:33 [INFO] __main__:   swing       : CV=0.567 (1,514 samples)
+2026-05-20 07:12:33 [INFO] __main__:   positional  : CV=0.605 (269 samples)
+2026-05-20 07:12:33 [INFO] __main__:   intraday    : CV=0.710 (4,299 samples)
+
+INDUSINDBK
+2026-05-20 07:15:03 [INFO] __main__: ✅ All models trained successfully
+2026-05-20 07:15:03 [INFO] __main__:   regime      : CV=0.000 (5,917 samples)
+2026-05-20 07:15:03 [INFO] __main__:   swing       : CV=0.488 (1,513 samples)
+2026-05-20 07:15:03 [INFO] __main__:   positional  : CV=0.573 (265 samples)
+2026-05-20 07:15:03 [INFO] __main__:   intraday    : CV=0.648 (4,299 samples)
+
+python main.py --ticker=HDFCBANK.NS

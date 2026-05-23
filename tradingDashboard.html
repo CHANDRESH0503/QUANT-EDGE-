@@ -1,0 +1,3673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QUANT EDGE · TRADING INTELLIGENCE</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@300;400;500&display=swap');
+
+  :root {
+    --bg:        #0a0b0d;
+    --bg2:       #0f1114;
+    --bg3:       #141720;
+    --border:    #1e2330;
+    --border2:   #252d40;
+    --green:     #00e676;
+    --green-dim: #00e67622;
+    --red:       #ff3d57;
+    --red-dim:   #ff3d5722;
+    --amber:     #ffb300;
+    --amber-dim: #ffb30020;
+    --blue:      #2979ff;
+    --blue-dim:  #2979ff20;
+    --cyan:      #00e5ff;
+    --purple:    #d500f9;
+    --text:      #e8eaf0;
+    --text2:     #8892a4;
+    --text3:     #4a5568;
+    --card:      #111318;
+    --card2:     #161b26;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    overflow-x: hidden;
+    cursor: crosshair;
+  }
+
+  /* ── SCANLINE OVERLAY ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.03) 2px,
+      rgba(0,0,0,0.03) 4px
+    );
+    pointer-events: none;
+    z-index: 999;
+  }
+
+  /* ── TOP BAR ── */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 20px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+
+  .topbar-left { display:flex; align-items:center; gap:16px; }
+
+  .logo {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 15px;
+    letter-spacing: 0.15em;
+    color: var(--green);
+  }
+
+  .logo span { color: var(--text3); }
+
+  .ticker-badge {
+    background: var(--green-dim);
+    border: 1px solid var(--green);
+    color: var(--green);
+    padding: 3px 10px;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    font-weight: 700;
+  }
+
+  .mode-badge {
+    background: var(--amber-dim);
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    padding: 3px 10px;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+  }
+
+  .bank-selector {
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    padding: 3px 10px;
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    outline: none;
+    appearance: none;
+  }
+  .bank-selector:hover { border-color: var(--green); color: var(--green); }
+
+  .topbar-right { display:flex; align-items:center; gap:20px; }
+
+  .live-dot {
+    display: flex; align-items:center; gap:6px;
+    font-size: 10px; color: var(--green);
+    letter-spacing: 0.1em;
+  }
+
+  .live-dot::before {
+    content: '';
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 1.5s ease infinite;
+  }
+
+  @keyframes pulse {
+    0%,100% { opacity:1; box-shadow: 0 0 0 0 rgba(0,230,118,0.4); }
+    50% { opacity:0.6; box-shadow: 0 0 0 6px rgba(0,230,118,0); }
+  }
+
+  .clock {
+    font-family: 'Space Mono', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: 0.05em;
+  }
+
+  .clock-sub {
+    font-size: 9px;
+    color: var(--text3);
+    letter-spacing: 0.15em;
+    text-align: right;
+  }
+
+  /* ── MAIN GRID ── */
+  .main { padding: 12px; display:grid; gap:10px; }
+
+  /* Row 1: Price hero + 3 model cards + regime */
+  .row1 {
+    display: grid;
+    grid-template-columns: 280px 1fr 1fr 1fr 200px;
+    gap: 10px;
+  }
+
+  /* Row 2: Chart + News + Order flow */
+  .row2 {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 10px;
+  }
+
+  /* Row 3: Signal pipeline + SR + Intermarket + FII */
+  .row3 {
+    display: grid;
+    grid-template-columns: 1fr 200px 200px 200px;
+    gap: 10px;
+  }
+
+  /* Row 4: News feed + Sentiment + Macro + Psychology */
+  .row4 {
+    display: grid;
+    grid-template-columns: 1fr 200px 200px 200px;
+    gap: 10px;
+  }
+
+  /* ── CARD BASE ── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    padding: 14px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border2), transparent);
+  }
+
+  .card-label {
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    color: var(--text3);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .card-label .badge {
+    font-size: 8px;
+    padding: 2px 6px;
+    border-radius: 2px;
+    letter-spacing: 0.1em;
+  }
+
+  .badge-green { background: var(--green-dim); color: var(--green); border: 1px solid var(--green)33; }
+  .badge-red   { background: var(--red-dim);   color: var(--red);   border: 1px solid var(--red)33; }
+  .badge-amber { background: var(--amber-dim); color: var(--amber); border: 1px solid var(--amber)33; }
+  .badge-blue  { background: var(--blue-dim);  color: var(--blue);  border: 1px solid var(--blue)33; }
+  .badge-cyan  { background: rgba(0,229,255,.15); color:var(--cyan); border:1px solid var(--cyan)33; }
+  .badge-grey  { background: rgba(120,120,120,.15); color: #888; border: 1px solid #88888833; }
+
+  /* ── PRICE HERO ── */
+  .price-hero { grid-column: 1; }
+
+  .price-main {
+    font-family: 'Space Mono', monospace;
+    font-size: 38px;
+    font-weight: 700;
+    color: var(--green);
+    letter-spacing: -0.02em;
+    line-height: 1;
+    animation: priceFlash 3s ease infinite;
+  }
+
+  @keyframes priceFlash {
+    0%,95%,100% { color: var(--green); }
+    97% { color: #fff; }
+  }
+
+  .price-change {
+    font-size: 13px;
+    color: var(--green);
+    font-weight: 700;
+    margin-top: 4px;
+  }
+
+  .price-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 12px;
+  }
+
+  .price-meta-item { }
+  .price-meta-item .label {
+    font-size: 8px;
+    color: var(--text3);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .price-meta-item .val {
+    font-size: 12px;
+    color: var(--text);
+    font-weight: 700;
+    margin-top: 2px;
+  }
+
+  .signal-big {
+    margin-top: 14px;
+    padding: 10px;
+    text-align: center;
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 22px;
+    letter-spacing: 0.2em;
+    border: 1px solid;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .signal-long {
+    color: var(--green);
+    border-color: var(--green);
+    background: var(--green-dim);
+    text-shadow: 0 0 20px var(--green);
+  }
+
+  .signal-short {
+    color: var(--red);
+    border-color: var(--red);
+    background: var(--red-dim);
+    text-shadow: 0 0 20px var(--red);
+  }
+
+  .signal-flat {
+    color: var(--text3);
+    border-color: var(--border2);
+    background: transparent;
+  }
+
+  .conf-bar-wrap { margin-top: 8px; }
+  .conf-label { display:flex; justify-content:space-between; font-size:9px; color:var(--text3); margin-bottom:4px; }
+  .conf-bar { height:4px; background: var(--border); border-radius:2px; overflow:hidden; }
+  .conf-fill { height:100%; border-radius:2px; transition: width 1s ease; }
+  .conf-fill-green { background: linear-gradient(90deg, var(--green), #69f0ae); }
+  .conf-fill-red   { background: linear-gradient(90deg, var(--red), #ff6b7a); }
+  .conf-fill-amber { background: linear-gradient(90deg, var(--amber), #ffd54f); }
+
+  /* ── MODEL CARDS ── */
+  .model-card .timeframe {
+    font-family: 'Syne', sans-serif;
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    margin-bottom: 4px;
+  }
+
+  .model-card .horizon {
+    font-size: 9px;
+    color: var(--text3);
+    letter-spacing: 0.1em;
+    margin-bottom: 12px;
+  }
+
+  .model-signal {
+    font-family: 'Space Mono', monospace;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    margin-bottom: 8px;
+  }
+
+  .prob-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 4px;
+    margin-top: 10px;
+  }
+
+  .prob-item {
+    text-align: center;
+    padding: 6px 4px;
+    border: 1px solid var(--border);
+    background: var(--bg3);
+  }
+
+  .prob-item .pl { font-size: 8px; color: var(--text3); letter-spacing:0.1em; margin-bottom:3px; }
+  .prob-item .pv { font-size: 14px; font-weight: 700; font-family:'Space Mono',monospace; }
+
+  .feature-list { margin-top: 10px; }
+  .feature-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+  }
+  .feature-row:last-child { border-bottom: none; }
+  .feature-row .fname { color: var(--text3); letter-spacing:0.05em; }
+  .feature-row .fval { font-weight: 700; font-family: 'Space Mono', monospace; }
+
+  /* ── REGIME ── */
+  .regime-name {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 16px;
+    letter-spacing: 0.1em;
+    margin: 8px 0;
+  }
+
+  .regime-stability { margin-top: 10px; }
+
+  .regime-bars { display: grid; gap: 4px; margin-top: 10px; }
+  .regime-bar-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 9px;
+  }
+  .regime-bar-label { color: var(--text3); width: 60px; letter-spacing:0.05em; flex-shrink:0; }
+  .regime-bar-track { flex: 1; height: 3px; background: var(--border); border-radius:2px; overflow:hidden; }
+  .regime-bar-fill { height: 100%; border-radius:2px; }
+  .regime-bar-val { color: var(--text); width: 30px; text-align:right; font-weight:700; }
+
+  /* ── CHART ── */
+  .chart-card { }
+
+  canvas {
+    width: 100% !important;
+    display: block;
+  }
+
+  .chart-controls {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+
+  .chart-btn {
+    padding: 3px 10px;
+    font-size: 9px;
+    font-family: 'DM Mono', monospace;
+    letter-spacing: 0.1em;
+    border: 1px solid var(--border2);
+    background: transparent;
+    color: var(--text3);
+    cursor: crosshair;
+    transition: all 0.2s;
+  }
+
+  .chart-btn.active, .chart-btn:hover {
+    border-color: var(--green);
+    color: var(--green);
+    background: var(--green-dim);
+  }
+
+  .chart-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .chart-stat { text-align: center; }
+  .chart-stat .cl { font-size: 8px; color:var(--text3); letter-spacing:0.1em; }
+  .chart-stat .cv { font-size: 12px; font-weight:700; font-family:'Space Mono',monospace; margin-top:2px; }
+
+  /* ── NEWS PANEL ── */
+  .news-tab {
+    font-size: 8px;
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    color: var(--text3);
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s;
+  }
+  .news-tab:hover { border-color: var(--text2); color: var(--text2); }
+  .news-tab.active { border-color: var(--green); color: var(--green); background: var(--green-dim); }
+  .news-tab[data-filter="negative"].active { border-color: var(--red); color: var(--red); background: var(--red-dim); }
+  .news-tab[data-filter="bse"].active { border-color: var(--cyan); color: var(--cyan); background: rgba(0,229,255,0.08); }
+
+  .news-feed {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    max-height: 380px;
+    overflow-y: auto;
+  }
+
+  .news-feed::-webkit-scrollbar { width: 3px; }
+  .news-feed::-webkit-scrollbar-track { background: var(--bg); }
+  .news-feed::-webkit-scrollbar-thumb { background: var(--border2); }
+
+  .news-item {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+  }
+
+  .news-item:hover { padding-left: 6px; }
+
+  .news-item:hover::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 2px;
+    background: var(--green);
+  }
+
+  .news-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 4px;
+  }
+
+  .news-source {
+    font-size: 8px;
+    color: var(--text3);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .news-time { font-size: 8px; color: var(--text3); }
+
+  .news-title {
+    font-size: 11px;
+    color: var(--text);
+    line-height: 1.4;
+    margin-bottom: 4px;
+  }
+
+  .news-title a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .news-title a:hover {
+    color: var(--green);
+    text-decoration: underline;
+  }
+
+  .news-sentiment {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .sent-bar { flex: 1; height: 2px; background: var(--border); border-radius:1px; overflow:hidden; }
+  .sent-fill { height: 100%; border-radius:1px; }
+  .sent-score { font-size: 9px; font-weight: 700; font-family:'Space Mono',monospace; }
+
+  /* ── SIGNAL PIPELINE ── */
+  .pipeline {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    overflow-x: auto;
+  }
+
+  .pipeline::-webkit-scrollbar { height: 2px; }
+  .pipeline::-webkit-scrollbar-thumb { background: var(--border2); }
+
+  .pipe-stage {
+    flex-shrink: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    background: var(--bg3);
+    position: relative;
+    min-width: 110px;
+  }
+
+  .pipe-stage + .pipe-stage { border-left: none; }
+
+  .pipe-stage::after {
+    content: '→';
+    position: absolute;
+    right: -10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text3);
+    font-size: 14px;
+    z-index: 1;
+  }
+
+  .pipe-stage:last-child::after { display: none; }
+
+  .pipe-num {
+    font-size: 8px;
+    color: var(--text3);
+    letter-spacing: 0.1em;
+    margin-bottom: 4px;
+  }
+
+  .pipe-name {
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+
+  .pipe-detail { font-size: 9px; color: var(--text3); margin-bottom: 6px; }
+
+  .pipe-status {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+
+  .pipe-time { font-size: 8px; color: var(--text3); margin-top: 4px; }
+
+  .pass { color: var(--green); }
+  .fail { color: var(--red); }
+  .wait { color: var(--amber); }
+  .active-pipe { border-color: var(--amber); background: var(--amber-dim); }
+
+  /* ── ALIGNMENT DISPLAY ── */
+  .alignment-grade {
+    font-family: 'Syne', sans-serif;
+    font-size: 48px;
+    font-weight: 800;
+    text-align: center;
+    line-height: 1;
+    margin: 8px 0;
+  }
+
+  .alignment-label {
+    text-align: center;
+    font-size: 9px;
+    color: var(--text3);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+
+  /* ── SR LEVELS ── */
+  .sr-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+  }
+
+  .sr-item:last-child { border-bottom: none; }
+
+  .sr-label { color: var(--text3); font-size: 9px; letter-spacing:0.08em; }
+  .sr-price { font-family: 'Space Mono', monospace; font-weight: 700; }
+  .sr-strength { display:flex; gap:2px; }
+  .sr-dot { width:5px; height:5px; border-radius:50%; background:var(--border); }
+  .sr-dot.filled { background: var(--amber); }
+
+  /* ── FII FLOW ── */
+  .flow-bar {
+    height: 40px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    position: relative;
+    margin: 8px 0;
+  }
+
+  .flow-fill {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    font-size: 11px;
+    font-weight: 700;
+    font-family: 'Space Mono', monospace;
+    transition: width 1s ease;
+  }
+
+  .fii-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .fii-row:last-child { border-bottom: none; }
+
+  /* ── INTERMARKET ── */
+  .im-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+  }
+
+  .im-row:last-child { border-bottom: none; }
+  .im-name { color: var(--text3); font-size: 9px; }
+  .im-val { font-family: 'Space Mono', monospace; font-weight: 700; }
+
+  /* ── MACRO ── */
+  .macro-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+  }
+
+  .macro-item:last-child { border-bottom: none; }
+  .macro-name { color: var(--text3); font-size: 9px; letter-spacing:0.06em; }
+
+  /* ── PSYCHOLOGY ── */
+  .psych-meter {
+    margin: 10px 0;
+  }
+
+  .psych-item {
+    margin-bottom: 8px;
+  }
+
+  .psych-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: var(--text3);
+    margin-bottom: 3px;
+    letter-spacing: 0.06em;
+  }
+
+  .psych-bar { height: 3px; background: var(--border); border-radius:2px; overflow:hidden; }
+  .psych-fill { height:100%; border-radius:2px; }
+
+  /* ── BOTTOM ROW ── */
+  .row5 {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 10px;
+  }
+
+  /* ── PORTFOLIO HEATMAP ── */
+  .heat-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .heat-item {
+    padding: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg3);
+  }
+
+  .heat-item .hl { font-size: 8px; color: var(--text3); letter-spacing:0.1em; margin-bottom:3px; }
+  .heat-item .hv { font-size: 14px; font-weight: 700; font-family: 'Space Mono', monospace; }
+
+  /* ── UNIVERSE RANKING ── */
+  .universe-row {
+    display: grid;
+    grid-template-columns: 16px 1fr 48px 80px 40px;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+  }
+
+  .universe-row:last-child { border-bottom:none; }
+  .universe-row.disqualified { opacity: 0.45; }
+
+  .uni-rank  { color: var(--text3); font-size:9px; }
+  .uni-name  { font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .uni-score { font-family: 'Space Mono', monospace; font-weight:700; font-size:9px; text-align:right; }
+  .uni-bar   { height: 3px; background: var(--border); border-radius:2px; overflow:hidden; }
+  .uni-fill  { height:100%; border-radius:2px; }
+  .uni-size  { font-family: 'Space Mono', monospace; font-size:9px; text-align:right; color: var(--text3); }
+
+  /* ── TRADE LOG ── */
+  .log-row {
+    display: grid;
+    grid-template-columns: 60px 50px 70px 70px 50px;
+    gap: 4px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 9px;
+    align-items: center;
+  }
+
+  .log-row:last-child { border-bottom: none; }
+  .log-head { color: var(--text3); font-size: 8px; letter-spacing:0.1em; }
+
+  /* ── SCROLLING TICKER ── */
+  .ticker-wrap {
+    overflow: hidden;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg2);
+    padding: 5px 0;
+    margin-bottom: 10px;
+  }
+
+  .ticker-scroll {
+    display: flex;
+    gap: 40px;
+    animation: scrollTicker 30s linear infinite;
+    white-space: nowrap;
+  }
+
+  @keyframes scrollTicker {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+
+  .ticker-item {
+    display: inline-flex;
+    gap: 8px;
+    font-size: 10px;
+    align-items: center;
+  }
+
+  .ticker-item .ts { color: var(--text3); letter-spacing: 0.1em; }
+  .ticker-item .tv { font-family: 'Space Mono', monospace; font-weight: 700; }
+
+  /* ── ALERTS ── */
+  .alert-item {
+    display: flex;
+    gap: 8px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border);
+    align-items: flex-start;
+    font-size: 10px;
+  }
+
+  .alert-icon { flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; margin-top: 3px; }
+  .alert-text { color: var(--text2); line-height: 1.4; }
+  .alert-time { color: var(--text3); font-size: 8px; margin-left: auto; white-space: nowrap; flex-shrink:0; }
+
+  /* ── WATERFALL ── */
+  .waterfall { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+  .wf-item { display: flex; align-items: center; gap: 6px; font-size: 9px; }
+  .wf-name { color: var(--text3); width: 90px; letter-spacing:0.05em; }
+  .wf-bar-wrap { flex:1; height:14px; background:var(--bg3); border:1px solid var(--border); overflow:hidden; position:relative; }
+  .wf-bar { height:100%; display:flex; align-items:center; padding-left:4px; font-size:8px; font-weight:700; min-width:4px; transition: width 1s ease; }
+  .wf-val { width:30px; text-align:right; font-family:'Space Mono',monospace; font-weight:700; }
+
+  /* ── GLOW EFFECTS ── */
+  .glow-green { box-shadow: 0 0 20px rgba(0,230,118,0.08); }
+  .glow-red   { box-shadow: 0 0 20px rgba(255,61,87,0.08); }
+  .glow-amber { box-shadow: 0 0 20px rgba(255,179,0,0.08); }
+
+  /* ── DIVIDER ── */
+  .section-div {
+    font-size: 8px;
+    letter-spacing: 0.2em;
+    color: var(--text3);
+    text-transform: uppercase;
+    padding: 4px 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .section-div::before, .section-div::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ── BLINK ANIMATION ── */
+  .blink { animation: blink 1s step-end infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+  /* ── NUMBER COUNTER ── */
+  .counter { display: inline-block; }
+
+  /* scrollbar global */
+  ::-webkit-scrollbar { width: 3px; height: 3px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border2); }
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="logo">QUANT<span>·</span>EDGE</div>
+    <div class="ticker-badge" id="tickerBadge">HDFCBANK · NSE</div>
+    <select id="bankSelect" class="bank-selector">
+      <option value="HDFCBANK.NS">HDFCBANK</option>
+      <option value="ICICIBANK.NS">ICICIBANK</option>
+      <option value="KOTAKBANK.NS">KOTAKBANK</option>
+      <option value="AXISBANK.NS">AXISBANK</option>
+      <option value="INDUSINDBK.NS">INDUSINDBK</option>
+    </select>
+    <div class="mode-badge">● SMALL CAPITAL MODE · ₹10,000</div>
+    <div class="badge badge-cyan" style="padding:3px 10px;font-size:9px;letter-spacing:0.1em;">6-GATE PIPELINE</div>
+  </div>
+  <div class="topbar-right">
+    <div class="live-dot">LIVE DATA</div>
+    <div>
+      <div class="clock" id="clock">--:--:--</div>
+      <div class="clock-sub" id="clockDate">IST · --</div>
+    </div>
+  </div>
+</div>
+
+<!-- TICKER STRIP -->
+<div class="ticker-wrap">
+  <div class="ticker-scroll" id="tickerScroll">
+    <span class="ticker-item"><span class="ts" style="color:var(--text3);letter-spacing:0.08em">CONNECTING TO MARKET DATA...</span></span>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- ROW 1: PRICE HERO + 3 MODELS + REGIME                 -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="row1">
+
+    <!-- PRICE HERO -->
+    <div class="card price-hero glow-green">
+      <div class="card-label">
+        <span id="priceHeroBank">HDFC BANK</span> · <span id="priceHeroMode">···</span>
+        <span id="marketStatusBadge" class="badge badge-grey">● CHECKING</span>
+      </div>
+      <div class="price-main" id="livePrice">—</div>
+      <div class="price-change" id="priceChange">—</div>
+
+      <div class="price-meta">
+        <div class="price-meta-item">
+          <div class="label">DAY HIGH</div>
+          <div class="val" id="priceHigh" style="color:var(--green)">—</div>
+        </div>
+        <div class="price-meta-item">
+          <div class="label">DAY LOW</div>
+          <div class="val" id="priceLow" style="color:var(--red)">—</div>
+        </div>
+        <div class="price-meta-item">
+          <div class="label">VOLUME</div>
+          <div class="val" id="volRatio">—</div>
+        </div>
+        <div class="price-meta-item">
+          <div class="label">52W HIGH</div>
+          <div class="val" id="price52wHigh">—</div>
+        </div>
+        <div class="price-meta-item">
+          <div class="label">RSI (14)</div>
+          <div class="val" id="priceRSI" style="color:var(--amber)">—</div>
+        </div>
+        <div class="price-meta-item">
+          <div class="label">ATR</div>
+          <div class="val" id="priceATR">—</div>
+        </div>
+      </div>
+
+      <div class="signal-big signal-long" id="signalBig">
+        LONG
+      </div>
+
+      <div class="conf-bar-wrap">
+        <div class="conf-label">
+          <span>FINAL CONFIDENCE</span>
+          <span id="confPct" style="color:var(--green);font-weight:700">71%</span>
+        </div>
+        <div class="conf-bar">
+          <div class="conf-fill conf-fill-green" id="confFill" style="width:71%"></div>
+        </div>
+      </div>
+
+      <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+        <div style="padding:6px;border:1px solid var(--border);background:var(--bg3);">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">ENTRY</div>
+          <div id="tradeEntry" style="font-family:'Space Mono',monospace;font-size:13px;font-weight:700;color:var(--text);margin-top:2px">₹1,842</div>
+        </div>
+        <div style="padding:6px;border:1px solid var(--border);background:var(--bg3);">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">STOP LOSS</div>
+          <div id="tradeStop" style="font-family:'Space Mono',monospace;font-size:13px;font-weight:700;color:var(--red);margin-top:2px">₹1,787</div>
+        </div>
+        <div style="padding:6px;border:1px solid var(--border);background:var(--bg3);">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">TARGET</div>
+          <div id="tradeTarget" style="font-family:'Space Mono',monospace;font-size:13px;font-weight:700;color:var(--green);margin-top:2px">₹1,934</div>
+        </div>
+        <div style="padding:6px;border:1px solid var(--border);background:var(--bg3);">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">R:R RATIO</div>
+          <div id="tradeRR" style="font-family:'Space Mono',monospace;font-size:13px;font-weight:700;color:var(--cyan);margin-top:2px">2.5 : 1</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- POSITIONAL MODEL -->
+    <div class="card model-card">
+      <div class="card-label">
+        POSITIONAL MODEL
+        <span class="badge badge-blue">WEEKLY</span>
+      </div>
+      <div class="timeframe" style="color:var(--blue)">POSITIONAL</div>
+      <div class="horizon">2-4 WEEKS HORIZON · WEEKLY CANDLES</div>
+
+      <div class="model-signal" id="posSignal" style="color:var(--text3)">— —</div>
+
+      <div class="conf-bar-wrap">
+        <div class="conf-label">
+          <span>CONFIDENCE</span>
+          <span id="posConf" style="color:var(--blue);font-weight:700">—</span>
+        </div>
+        <div class="conf-bar">
+          <div class="conf-fill" id="posFill" style="width:0%;background:linear-gradient(90deg,var(--blue),#82b1ff)"></div>
+        </div>
+      </div>
+
+      <div class="prob-grid">
+        <div class="prob-item">
+          <div class="pl">LONG</div>
+          <div class="pv" id="posProbLong" style="color:var(--green)">—</div>
+        </div>
+        <div class="prob-item">
+          <div class="pl">FLAT</div>
+          <div class="pv" id="posProbFlat" style="color:var(--text3)">—</div>
+        </div>
+        <div class="prob-item">
+          <div class="pl">SHORT</div>
+          <div class="pv" id="posProbShort" style="color:var(--red)">—</div>
+        </div>
+      </div>
+
+      <div class="feature-list">
+        <div class="feature-row">
+          <span class="fname">EMA20 vs EMA50</span>
+          <span class="fval" id="posEmaSignal" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">WEEKLY RSI</span>
+          <span class="fval" id="posWeeklyRsi" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">FUND GRADE</span>
+          <span class="fval" id="posFundGrade" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">NIM TREND</span>
+          <span class="fval" id="posNimTrend" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">NPA TREND</span>
+          <span class="fval" id="posNpaTrend" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">EARNINGS</span>
+          <span class="fval" id="posEarnings" style="color:var(--text3)">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- SWING MODEL -->
+    <div class="card model-card glow-green">
+      <div class="card-label">
+        SWING MODEL · PRIMARY
+        <span class="badge badge-green">DAILY</span>
+      </div>
+      <div class="timeframe" style="color:var(--green)">SWING</div>
+      <div class="horizon">3-7 DAYS HORIZON · DAILY CANDLES · 25YR DATA</div>
+
+      <div class="model-signal" id="swingSignal" style="color:var(--text3)">— —</div>
+
+      <div class="conf-bar-wrap">
+        <div class="conf-label">
+          <span>CONFIDENCE</span>
+          <span id="swingConf" style="color:var(--green);font-weight:700">—</span>
+        </div>
+        <div class="conf-bar">
+          <div class="conf-fill conf-fill-green" id="swingFill" style="width:0%"></div>
+        </div>
+      </div>
+
+      <div class="prob-grid">
+        <div class="prob-item">
+          <div class="pl">LONG</div>
+          <div class="pv" id="swingProbLong" style="color:var(--green)">—</div>
+        </div>
+        <div class="prob-item">
+          <div class="pl">FLAT</div>
+          <div class="pv" id="swingProbFlat" style="color:var(--text3)">—</div>
+        </div>
+        <div class="prob-item">
+          <div class="pl">SHORT</div>
+          <div class="pv" id="swingProbShort" style="color:var(--red)">—</div>
+        </div>
+      </div>
+
+      <div class="feature-list">
+        <div class="feature-row">
+          <span class="fname">RSI (14)</span>
+          <span class="fval" id="swingRsi14" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">MACD</span>
+          <span class="fval" id="swingMacd" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">VOL RATIO</span>
+          <span class="fval" id="swingVolRatio" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">SENTIMENT</span>
+          <span class="fval" id="swingSentiment" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">vs NIFTY (5D)</span>
+          <span class="fval" id="swingVsNifty" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">BB POSITION</span>
+          <span class="fval" id="swingBBPos" style="color:var(--text3)">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- INTRADAY MODEL -->
+    <div class="card model-card">
+      <div class="card-label">
+        INTRADAY MODEL
+        <span class="badge badge-amber">5-MIN</span>
+      </div>
+      <div class="timeframe" style="color:var(--amber)">INTRADAY</div>
+      <div class="horizon">30-90 MIN HORIZON · 5-MIN CANDLES</div>
+
+      <div class="model-signal" id="intradaySignal" style="color:var(--text3)">— —</div>
+
+      <div class="conf-bar-wrap">
+        <div class="conf-label">
+          <span>CONFIDENCE</span>
+          <span id="intradayConf" style="color:var(--amber);font-weight:700">—</span>
+        </div>
+        <div class="conf-bar">
+          <div class="conf-fill conf-fill-amber" id="intradayFill" style="width:0%"></div>
+        </div>
+      </div>
+
+      <div class="prob-grid">
+        <div class="prob-item">
+          <div class="pl">LONG</div>
+          <div class="pv" id="intradayProbLong" style="color:var(--green)">—</div>
+        </div>
+        <div class="prob-item">
+          <div class="pl">FLAT</div>
+          <div class="pv" id="intradayProbFlat" style="color:var(--text3)">—</div>
+        </div>
+        <div class="prob-item">
+          <div class="pl">SHORT</div>
+          <div class="pv" id="intradayProbShort" style="color:var(--red)">—</div>
+        </div>
+      </div>
+
+      <div class="feature-list">
+        <div class="feature-row">
+          <span class="fname">VWAP</span>
+          <span class="fval" id="intradayVwap" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">RSI (9)</span>
+          <span class="fval" id="intradayRsi9" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">DELTA</span>
+          <span class="fval" id="intradayDelta" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">MORNING DIR</span>
+          <span class="fval" id="intradayMorningDir" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">ABSORPTION</span>
+          <span class="fval" id="intradayAbsorption" style="color:var(--text3)">—</span>
+        </div>
+        <div class="feature-row">
+          <span class="fname">EXIT BY</span>
+          <span class="fval" style="color:var(--amber)">15:15 IST</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- REGIME + ALIGNMENT -->
+    <div class="card">
+      <div class="card-label">MARKET REGIME</div>
+
+      <div class="regime-name" id="regimeName" style="color:var(--green)">BULL<br>TRENDING</div>
+
+      <div class="conf-bar-wrap">
+        <div class="conf-label">
+          <span>STABILITY</span>
+          <span id="stabilityPct" style="color:var(--green);font-weight:700">87%</span>
+        </div>
+        <div class="conf-bar">
+          <div class="conf-fill conf-fill-green" id="stabilityFill" style="width:87%"></div>
+        </div>
+      </div>
+
+      <div class="regime-bars">
+        <div class="regime-bar-item">
+          <span class="regime-bar-label">BULL TREND</span>
+          <div class="regime-bar-track"><div class="regime-bar-fill" id="bullFill" style="width:87%;background:var(--green)"></div></div>
+          <span class="regime-bar-val" id="bullVal" style="color:var(--green)">87%</span>
+        </div>
+        <div class="regime-bar-item">
+          <span class="regime-bar-label">BEAR TREND</span>
+          <div class="regime-bar-track"><div class="regime-bar-fill" id="bearFill" style="width:4%;background:var(--red)"></div></div>
+          <span class="regime-bar-val" id="bearVal" style="color:var(--red)">4%</span>
+        </div>
+        <div class="regime-bar-item">
+          <span class="regime-bar-label">HIGH VOL</span>
+          <div class="regime-bar-track"><div class="regime-bar-fill" id="hvFill" style="width:6%;background:var(--amber)"></div></div>
+          <span class="regime-bar-val" id="hvVal" style="color:var(--amber)">6%</span>
+        </div>
+        <div class="regime-bar-item">
+          <span class="regime-bar-label">CHOPPY</span>
+          <div class="regime-bar-track"><div class="regime-bar-fill" id="choppyFill" style="width:3%;background:var(--text3)"></div></div>
+          <span class="regime-bar-val" id="choppyVal" style="color:var(--text3)">3%</span>
+        </div>
+      </div>
+
+      <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
+        <div class="card-label" style="margin-bottom:4px">ALIGNMENT</div>
+        <div class="alignment-grade" id="alignGrade" style="color:var(--green)">A+</div>
+        <div class="alignment-label" id="alignDesc">ALL TIMEFRAMES AGREE</div>
+        <div id="alignModelRow" style="margin-top:8px;font-size:9px;color:var(--text3);text-align:center;line-height:1.5">
+          — · — · —<br>
+          <span id="alignBoost" style="color:var(--text3)">awaiting signal</span>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /row1 -->
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- ROW 2: CHART + NEWS                                    -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="row2">
+
+    <!-- CHART -->
+    <div class="card chart-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="card-label" style="margin-bottom:0">PRICE CHART · <span id="chartBankLabel">HDFC BANK</span></div>
+        <div class="chart-controls">
+          <button class="chart-btn">5M</button>
+          <button class="chart-btn">15M</button>
+          <button class="chart-btn active">1D</button>
+          <button class="chart-btn">1W</button>
+          <button class="chart-btn">1M</button>
+        </div>
+      </div>
+
+      <canvas id="priceChart" height="200"></canvas>
+
+      <div class="chart-stats">
+        <div class="chart-stat">
+          <div class="cl">OPEN</div><div class="cv" id="chartOpen">—</div>
+        </div>
+        <div class="chart-stat">
+          <div class="cl">HIGH</div>
+          <div class="cv" id="chartHigh" style="color:var(--green)">—</div>
+        </div>
+        <div class="chart-stat">
+          <div class="cl">LOW</div>
+          <div class="cv" id="chartLow" style="color:var(--red)">—</div>
+        </div>
+        <div class="chart-stat">
+          <div class="cl">VOLUME</div>
+          <div class="cv" id="chartVol" style="color:var(--amber)">—</div>
+        </div>
+      </div>
+
+      <!-- Support/Resistance levels on chart -->
+      <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
+        <div class="card-label" style="margin-bottom:8px">KEY LEVELS · SUPPORT & RESISTANCE</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">
+          <div>
+            <div style="font-size:8px;color:var(--red);letter-spacing:0.1em;margin-bottom:4px">RESISTANCE</div>
+            <div class="sr-item">
+              <div><div class="sr-label">R3 · STRONG</div><div class="sr-price" id="srR3" style="color:var(--red)">—</div></div>
+              <div class="sr-strength"><div class="sr-dot filled"></div><div class="sr-dot filled"></div><div class="sr-dot filled"></div></div>
+            </div>
+            <div class="sr-item">
+              <div><div class="sr-label">R2 · MEDIUM</div><div class="sr-price" id="srR2" style="color:var(--red)">—</div></div>
+              <div class="sr-strength"><div class="sr-dot filled"></div><div class="sr-dot filled"></div><div class="sr-dot"></div></div>
+            </div>
+            <div class="sr-item">
+              <div><div class="sr-label">R1 · WEAK</div><div class="sr-price" id="srR1" style="color:var(--red)">—</div></div>
+              <div class="sr-strength"><div class="sr-dot filled"></div><div class="sr-dot"></div><div class="sr-dot"></div></div>
+            </div>
+          </div>
+          <div style="border-left:1px solid var(--border);border-right:1px solid var(--border);padding:0 10px;">
+            <div style="font-size:8px;color:var(--cyan);letter-spacing:0.1em;margin-bottom:4px">CURRENT</div>
+            <div style="padding:8px;background:var(--green-dim);border:1px solid var(--green);text-align:center;margin-top:4px;">
+              <div style="font-size:8px;color:var(--text3)">LIVE PRICE</div>
+              <div id="srCurrentPrice" style="font-family:'Space Mono',monospace;font-size:16px;font-weight:700;color:var(--green)">—</div>
+              <div id="srCurrentStatus" style="font-size:8px;color:var(--text3);margin-top:2px">—</div>
+            </div>
+            <div style="margin-top:8px;font-size:9px;color:var(--text3);text-align:center">
+              <span id="srEntryZone">—</span>
+            </div>
+          </div>
+          <div>
+            <div style="font-size:8px;color:var(--green);letter-spacing:0.1em;margin-bottom:4px">SUPPORT</div>
+            <div class="sr-item">
+              <div><div class="sr-label">S1 · STRONG</div><div class="sr-price" id="srS1" style="color:var(--green)">—</div></div>
+              <div class="sr-strength"><div class="sr-dot filled"></div><div class="sr-dot filled"></div><div class="sr-dot filled"></div></div>
+            </div>
+            <div class="sr-item">
+              <div><div class="sr-label">S2 · MEDIUM</div><div class="sr-price" id="srS2" style="color:var(--green)">—</div></div>
+              <div class="sr-strength"><div class="sr-dot filled"></div><div class="sr-dot filled"></div><div class="sr-dot"></div></div>
+            </div>
+            <div class="sr-item">
+              <div><div class="sr-label">S3 · STRONG</div><div class="sr-price" id="srS3" style="color:var(--green)">—</div></div>
+              <div class="sr-strength"><div class="sr-dot filled"></div><div class="sr-dot filled"></div><div class="sr-dot filled"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- NEWS FEED -->
+    <div class="card">
+      <div class="card-label">
+        NEWS INTELLIGENCE
+        <span class="badge badge-green blink">● 4 RSS FEEDS</span>
+      </div>
+
+      <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;">
+        <div class="news-tab active" data-filter="all">ALL</div>
+        <div class="news-tab" data-filter="positive">POSITIVE</div>
+        <div class="news-tab" data-filter="negative">NEGATIVE</div>
+        <div class="news-tab" data-filter="bse">BSE</div>
+      </div>
+
+      <div class="news-feed" id="newsFeed">
+        <div style="color:var(--text3);font-size:10px;padding:10px 0">Fetching live news...</div>
+      </div>
+
+      <div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;text-align:center;">
+          <div>
+            <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">24H ARTICLES</div>
+            <div id="newsCount" style="font-size:18px;font-weight:700;font-family:'Space Mono',monospace;color:var(--text)">—</div>
+          </div>
+          <div>
+            <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">AVG SENTIMENT</div>
+            <div id="newsSentAvg" style="font-size:18px;font-weight:700;font-family:'Space Mono',monospace;color:var(--text3)">—</div>
+          </div>
+          <div>
+            <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">FINBERT QUAL</div>
+            <div id="newsSentQuality" style="font-size:18px;font-weight:700;font-family:'Space Mono',monospace;color:var(--text3)">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /row2 -->
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- ROW 3: PER-CATEGORY 6-GATE PIPELINES                   -->
+  <!-- One panel per ML model category. Gates 1–3 are global  -->
+  <!-- (identical across panels). Gates 4–6 differ per model. -->
+  <!-- A signal fires the moment ANY category clears all 6.   -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="section-div">SIGNAL PIPELINE · 6-GATE × 3 CATEGORIES</div>
+
+  <!-- ── SWING (green) ──────────────────────────────────────── -->
+  <div class="card" style="padding:12px;border-left:4px solid var(--green);margin-bottom:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.06)">
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:13px;color:var(--green);letter-spacing:0.15em">SWING</div>
+        <div id="swingDir"  style="font-family:'Space Mono',monospace;font-size:13px;font-weight:700;color:var(--text3)">—</div>
+        <div id="swingConf" style="font-family:'Space Mono',monospace;font-size:11px;color:var(--text3)">—</div>
+      </div>
+      <div id="swingVerdict" style="font-size:10px;color:var(--text3);letter-spacing:0.1em">AWAITING</div>
+    </div>
+    <div style="display:flex;align-items:stretch;gap:0;overflow-x:auto">
+      <div class="pipe-stage" id="swingPipeGate01" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 01</div><div class="pipe-name" id="swingPipeG1Name" style="color:var(--text3)">REGIME</div><div class="pipe-detail">Market state check<br>HMM classifier</div><div class="pipe-status" id="swingPipeG1Status" style="color:var(--text3)">—</div><div class="pipe-time" id="swingPipeG1Time">—</div></div>
+      <div class="pipe-stage" id="swingPipeGate02" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 02</div><div class="pipe-name" id="swingPipeG2Name" style="color:var(--text3)">RULES</div><div class="pipe-detail">11 condition checks<br>Trend+Vol+RBI+VIX</div><div class="pipe-status" id="swingPipeG2Status" style="color:var(--text3)">—</div><div class="pipe-time" id="swingPipeG2Time">—</div></div>
+      <div class="pipe-stage" id="swingPipeGate03" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 03</div><div class="pipe-name" id="swingPipeG3Name" style="color:var(--text3)">UNIVERSE</div><div class="pipe-detail">All 5 banks eligible<br>Rank → size mult</div><div class="pipe-status" id="swingPipeG3Status" style="color:var(--text3)">—</div><div class="pipe-time" id="swingPipeG3Time">—</div></div>
+      <div class="pipe-stage" id="swingPipeGate04" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 04</div><div class="pipe-name" id="swingPipeG4Name" style="color:var(--text3)">SWING ML</div><div class="pipe-detail">XGBoost · swing model<br>prod variant</div><div class="pipe-status" id="swingPipeG4Status" style="color:var(--text3)">—</div><div class="pipe-time" id="swingPipeG4Time">—</div></div>
+      <div class="pipe-stage" id="swingPipeGate05" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 05</div><div class="pipe-name" id="swingPipeG5Name" style="color:var(--text3)">S/R VALID</div><div class="pipe-detail">Entry quality<br>+R:R per direction</div><div class="pipe-status" id="swingPipeG5Status" style="color:var(--text3)">—</div><div class="pipe-time" id="swingPipeG5Time">—</div></div>
+      <div class="pipe-stage" id="swingPipeGate06" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 06</div><div class="pipe-name" id="swingPipeG6Name" style="color:var(--text3)">CONFIDENCE</div><div class="pipe-detail">Swing thr. 60%<br>VIX-adjusted</div><div class="pipe-status" id="swingPipeG6Status" style="color:var(--text3)">—</div><div class="pipe-time" id="swingPipeG6Time">—</div></div>
+      <div class="pipe-stage" id="swingPipeOutput" style="border-color:var(--text3);background:transparent;min-width:120px"><div class="pipe-num">OUTPUT</div><div class="pipe-name" style="color:var(--green)">SWING</div><div class="pipe-detail">Send if all 6 pass</div><div class="pipe-status" id="swingPipeOutSignal" style="color:var(--text3);font-size:14px;font-family:'Syne',sans-serif;font-weight:800">—</div><div class="pipe-time" id="swingPipeOutDetail" style="color:var(--text3)">awaiting</div></div>
+    </div>
+  </div>
+
+  <!-- ── POSITIONAL (blue) ──────────────────────────────────── -->
+  <div class="card" style="padding:12px;border-left:4px solid var(--blue);margin-bottom:8px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.06)">
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:13px;color:var(--blue);letter-spacing:0.15em">POSITIONAL</div>
+        <div id="positionalDir"  style="font-family:'Space Mono',monospace;font-size:13px;font-weight:700;color:var(--text3)">—</div>
+        <div id="positionalConf" style="font-family:'Space Mono',monospace;font-size:11px;color:var(--text3)">—</div>
+      </div>
+      <div id="positionalVerdict" style="font-size:10px;color:var(--text3);letter-spacing:0.1em">AWAITING</div>
+    </div>
+    <div style="display:flex;align-items:stretch;gap:0;overflow-x:auto">
+      <div class="pipe-stage" id="positionalPipeGate01" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 01</div><div class="pipe-name" id="positionalPipeG1Name" style="color:var(--text3)">REGIME</div><div class="pipe-detail">Market state check<br>HMM classifier</div><div class="pipe-status" id="positionalPipeG1Status" style="color:var(--text3)">—</div><div class="pipe-time" id="positionalPipeG1Time">—</div></div>
+      <div class="pipe-stage" id="positionalPipeGate02" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 02</div><div class="pipe-name" id="positionalPipeG2Name" style="color:var(--text3)">RULES</div><div class="pipe-detail">11 condition checks<br>Trend+Vol+RBI+VIX</div><div class="pipe-status" id="positionalPipeG2Status" style="color:var(--text3)">—</div><div class="pipe-time" id="positionalPipeG2Time">—</div></div>
+      <div class="pipe-stage" id="positionalPipeGate03" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 03</div><div class="pipe-name" id="positionalPipeG3Name" style="color:var(--text3)">UNIVERSE</div><div class="pipe-detail">All 5 banks eligible<br>Rank → size mult</div><div class="pipe-status" id="positionalPipeG3Status" style="color:var(--text3)">—</div><div class="pipe-time" id="positionalPipeG3Time">—</div></div>
+      <div class="pipe-stage" id="positionalPipeGate04" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 04</div><div class="pipe-name" id="positionalPipeG4Name" style="color:var(--text3)">POS ML</div><div class="pipe-detail">XGBoost · positional<br>prod variant</div><div class="pipe-status" id="positionalPipeG4Status" style="color:var(--text3)">—</div><div class="pipe-time" id="positionalPipeG4Time">—</div></div>
+      <div class="pipe-stage" id="positionalPipeGate05" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 05</div><div class="pipe-name" id="positionalPipeG5Name" style="color:var(--text3)">S/R VALID</div><div class="pipe-detail">Entry quality<br>+R:R per direction</div><div class="pipe-status" id="positionalPipeG5Status" style="color:var(--text3)">—</div><div class="pipe-time" id="positionalPipeG5Time">—</div></div>
+      <div class="pipe-stage" id="positionalPipeGate06" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 06</div><div class="pipe-name" id="positionalPipeG6Name" style="color:var(--text3)">CONFIDENCE</div><div class="pipe-detail">Positional thr. 55%<br>VIX-adjusted</div><div class="pipe-status" id="positionalPipeG6Status" style="color:var(--text3)">—</div><div class="pipe-time" id="positionalPipeG6Time">—</div></div>
+      <div class="pipe-stage" id="positionalPipeOutput" style="border-color:var(--text3);background:transparent;min-width:120px"><div class="pipe-num">OUTPUT</div><div class="pipe-name" style="color:var(--blue)">POSITIONAL</div><div class="pipe-detail">Send if all 6 pass</div><div class="pipe-status" id="positionalPipeOutSignal" style="color:var(--text3);font-size:14px;font-family:'Syne',sans-serif;font-weight:800">—</div><div class="pipe-time" id="positionalPipeOutDetail" style="color:var(--text3)">awaiting</div></div>
+    </div>
+  </div>
+
+  <!-- ── INTRADAY (amber) ───────────────────────────────────── -->
+  <div class="card" style="padding:12px;border-left:4px solid var(--amber)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.06)">
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:13px;color:var(--amber);letter-spacing:0.15em">INTRADAY</div>
+        <div id="intradayDir"  style="font-family:'Space Mono',monospace;font-size:13px;font-weight:700;color:var(--text3)">—</div>
+        <div id="intradayConf" style="font-family:'Space Mono',monospace;font-size:11px;color:var(--text3)">—</div>
+      </div>
+      <div id="intradayVerdict" style="font-size:10px;color:var(--text3);letter-spacing:0.1em">AWAITING</div>
+    </div>
+    <div style="display:flex;align-items:stretch;gap:0;overflow-x:auto">
+      <div class="pipe-stage" id="intradayPipeGate01" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 01</div><div class="pipe-name" id="intradayPipeG1Name" style="color:var(--text3)">REGIME</div><div class="pipe-detail">Market state check<br>HMM classifier</div><div class="pipe-status" id="intradayPipeG1Status" style="color:var(--text3)">—</div><div class="pipe-time" id="intradayPipeG1Time">—</div></div>
+      <div class="pipe-stage" id="intradayPipeGate02" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 02</div><div class="pipe-name" id="intradayPipeG2Name" style="color:var(--text3)">RULES</div><div class="pipe-detail">11 condition checks<br>Trend+Vol+RBI+VIX</div><div class="pipe-status" id="intradayPipeG2Status" style="color:var(--text3)">—</div><div class="pipe-time" id="intradayPipeG2Time">—</div></div>
+      <div class="pipe-stage" id="intradayPipeGate03" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 03</div><div class="pipe-name" id="intradayPipeG3Name" style="color:var(--text3)">UNIVERSE</div><div class="pipe-detail">All 5 banks eligible<br>Rank → size mult</div><div class="pipe-status" id="intradayPipeG3Status" style="color:var(--text3)">—</div><div class="pipe-time" id="intradayPipeG3Time">—</div></div>
+      <div class="pipe-stage" id="intradayPipeGate04" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 04</div><div class="pipe-name" id="intradayPipeG4Name" style="color:var(--text3)">INTRADAY ML</div><div class="pipe-detail">XGBoost · intraday<br>prod variant</div><div class="pipe-status" id="intradayPipeG4Status" style="color:var(--text3)">—</div><div class="pipe-time" id="intradayPipeG4Time">—</div></div>
+      <div class="pipe-stage" id="intradayPipeGate05" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 05</div><div class="pipe-name" id="intradayPipeG5Name" style="color:var(--text3)">S/R VALID</div><div class="pipe-detail">Entry quality<br>+R:R per direction</div><div class="pipe-status" id="intradayPipeG5Status" style="color:var(--text3)">—</div><div class="pipe-time" id="intradayPipeG5Time">—</div></div>
+      <div class="pipe-stage" id="intradayPipeGate06" style="border-color:var(--text3);background:transparent"><div class="pipe-num">GATE 06</div><div class="pipe-name" id="intradayPipeG6Name" style="color:var(--text3)">CONFIDENCE</div><div class="pipe-detail">Intraday thr. 65%<br>VIX-adjusted</div><div class="pipe-status" id="intradayPipeG6Status" style="color:var(--text3)">—</div><div class="pipe-time" id="intradayPipeG6Time">—</div></div>
+      <div class="pipe-stage" id="intradayPipeOutput" style="border-color:var(--text3);background:transparent;min-width:120px"><div class="pipe-num">OUTPUT</div><div class="pipe-name" style="color:var(--amber)">INTRADAY</div><div class="pipe-detail">Send if all 6 pass</div><div class="pipe-status" id="intradayPipeOutSignal" style="color:var(--text3);font-size:14px;font-family:'Syne',sans-serif;font-weight:800">—</div><div class="pipe-time" id="intradayPipeOutDetail" style="color:var(--text3)">awaiting</div></div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- ROW 4: DATA PANELS                                     -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="row3">
+
+    <!-- ORDER FLOW + WATERFALL -->
+    <div class="card">
+      <div class="card-label">
+        ORDER FLOW ANALYSIS
+        <span class="badge badge-green">LIVE</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <div>
+          <div style="font-size:9px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">DELTA · BUY vs SELL PRESSURE</div>
+
+          <div style="display:flex;height:60px;gap:2px;align-items:flex-end;margin-bottom:6px" id="deltaChart">
+          </div>
+
+          <div style="display:flex;justify-content:space-between;font-size:9px;">
+            <span style="color:var(--text3)">CUM DELTA</span>
+            <span id="ofCumDelta" style="color:var(--text3);font-family:'Space Mono',monospace;font-weight:700">—</span>
+          </div>
+
+          <div style="margin-top:8px;padding:6px;background:var(--bg2);border:1px solid var(--border);text-align:center;">
+            <div style="font-size:8px;color:var(--text3)">DELTA SIGNAL</div>
+            <div id="ofDeltaSignal" style="font-size:12px;font-weight:700;color:var(--text3)">—</div>
+          </div>
+
+          <div style="margin-top:8px;">
+            <div class="fii-row">
+              <span style="color:var(--text3)">INST. BIAS</span>
+              <span id="ofInstBias" style="color:var(--text3);font-weight:700">—</span>
+            </div>
+            <div class="fii-row">
+              <span style="color:var(--text3)">VWAP</span>
+              <span id="ofVwap" style="color:var(--text3);font-weight:700">—</span>
+            </div>
+            <div class="fii-row">
+              <span style="color:var(--text3)">ABSORPTION</span>
+              <span id="ofAbsorption" style="color:var(--text3);font-weight:700">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:9px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">FEATURE IMPORTANCE · ML</div>
+          <div class="waterfall" id="featureImportancePanel">
+            <div style="color:var(--text3);font-size:9px;padding:6px 0">Loading model data...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FII/DII + OPTIONS -->
+    <div class="card">
+      <div class="card-label">FII / DII FLOW <span id="fiiConfluenceBadge" class="badge badge-amber" style="font-size:7px">—</span></div>
+
+      <div class="flow-bar">
+        <div class="flow-fill" id="fiiBar" style="width:0%;background:linear-gradient(90deg,var(--green),#69f0ae);color:var(--bg)">
+          —
+        </div>
+      </div>
+
+      <div class="fii-row">
+        <span style="color:var(--text3)">FII NET</span>
+        <span id="fiiNet" style="color:var(--text3);font-weight:700;font-family:'Space Mono',monospace">—</span>
+      </div>
+      <div class="fii-row">
+        <span style="color:var(--text3)">DII NET</span>
+        <span id="diiNet" style="color:var(--text3);font-weight:700;font-family:'Space Mono',monospace">—</span>
+      </div>
+      <div class="fii-row">
+        <span style="color:var(--text3)">FII 5D NET</span>
+        <span id="fii5d" style="color:var(--text3);font-weight:700;font-family:'Space Mono',monospace">—</span>
+      </div>
+      <div class="fii-row">
+        <span style="color:var(--text3)">DII 5D NET</span>
+        <span id="dii5d" style="color:var(--text3);font-weight:700;font-family:'Space Mono',monospace">—</span>
+      </div>
+
+      <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
+        <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">
+          5D FLOW HISTORY &nbsp;
+          <span style="color:var(--green)">■</span> FII &nbsp;
+          <span style="color:#64b5f6">■</span> DII
+        </div>
+        <div id="fiiHistory" style="display:flex;gap:3px;align-items:flex-end;height:70px;"></div>
+      </div>
+
+      <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+        <div class="card-label" style="margin-bottom:8px">OPTIONS · PCR</div>
+
+        <div style="text-align:center;margin:8px 0;">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">PUT/CALL RATIO</div>
+          <div id="optPcr" style="font-family:'Space Mono',monospace;font-size:28px;font-weight:700;color:var(--text3)">—</div>
+          <div id="optPcrSignal" style="font-size:10px;color:var(--text3)">—</div>
+        </div>
+
+        <div class="fii-row">
+          <span style="color:var(--text3)">TOTAL CALL OI</span>
+          <span id="optCallOI" style="font-family:'Space Mono',monospace">—</span>
+        </div>
+        <div class="fii-row">
+          <span style="color:var(--text3)">TOTAL PUT OI</span>
+          <span id="optPutOI" style="font-family:'Space Mono',monospace">—</span>
+        </div>
+        <div class="fii-row">
+          <span style="color:var(--text3)">MAX PAIN</span>
+          <span id="optMaxPain" style="font-family:'Space Mono',monospace;color:var(--amber)">—</span>
+        </div>
+        <div class="fii-row">
+          <span style="color:var(--text3)">IMPL. MOVE</span>
+          <span id="optImplMove" style="font-family:'Space Mono',monospace;color:var(--cyan)">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- INTERMARKET -->
+    <div class="card">
+      <div class="card-label">
+        INTERMARKET
+        <span id="imVerdictBadge" class="badge badge-amber">—</span>
+      </div>
+
+      <div class="im-row">
+        <div>
+          <div class="im-name">BANK NIFTY</div>
+          <div class="im-val" id="imBankNifty" style="color:var(--text3)">—</div>
+        </div>
+        <div style="font-size:9px;color:var(--text3)">—</div>
+      </div>
+      <div class="im-row">
+        <div>
+          <div class="im-name">S&P 500</div>
+          <div class="im-val" id="imSP500" style="color:var(--text3)">—</div>
+        </div>
+        <div style="font-size:9px;color:var(--text3)">—</div>
+      </div>
+      <div class="im-row">
+        <div>
+          <div class="im-name">US 10Y YIELD</div>
+          <div class="im-val" id="imUS10Y" style="color:var(--text3)">—</div>
+        </div>
+        <div style="font-size:9px;color:var(--text3)">—</div>
+      </div>
+      <div class="im-row">
+        <div>
+          <div class="im-name">USD/INR</div>
+          <div class="im-val" id="imUSDINR" style="color:var(--text3)">—</div>
+        </div>
+        <div style="font-size:9px;color:var(--text3)">—</div>
+      </div>
+      <div class="im-row">
+        <div>
+          <div class="im-name">CRUDE OIL</div>
+          <div class="im-val" id="imCrude" style="color:var(--text3)">—</div>
+        </div>
+        <div style="font-size:9px;color:var(--text3)">—</div>
+      </div>
+      <div class="im-row">
+        <div>
+          <div class="im-name">INDIA VIX</div>
+          <div class="im-val" id="imVIX" style="color:var(--text3)">—</div>
+        </div>
+        <div style="font-size:9px;color:var(--text3)">—</div>
+      </div>
+      <div class="im-row">
+        <div>
+          <div class="im-name">JPMORGAN</div>
+          <div class="im-val" id="imJPM" style="color:var(--text3)">—</div>
+        </div>
+        <div style="font-size:9px;color:var(--text3)">—</div>
+      </div>
+      <div class="im-row">
+        <div>
+          <div class="im-name">DOLLAR INDEX</div>
+          <div class="im-val" id="imDXY" style="color:var(--text3)">—</div>
+        </div>
+        <div id="imDXYTrend" style="font-size:9px;color:var(--text3)">—</div>
+      </div>
+
+      <div style="margin-top:10px;padding:8px;background:var(--green-dim);border:1px solid var(--green)33;display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:9px;color:var(--text3)">VERDICT</span>
+        <span id="imVerdict" style="font-family:'Space Mono',monospace;font-weight:700;font-size:14px;color:var(--green)">NEUTRAL</span>
+      </div>
+    </div>
+
+    <!-- MACRO -->
+    <div class="card">
+      <div class="card-label">MACRO INDICATORS</div>
+
+      <div class="macro-item">
+        <div>
+          <div class="macro-name">RBI RATE</div>
+          <div id="macroRBI" style="font-size:12px;font-weight:700;font-family:'Space Mono',monospace">—</div>
+        </div>
+        <span id="macroRBIBadge" class="badge badge-green" style="font-size:8px">—</span>
+      </div>
+
+      <div class="macro-item">
+        <div>
+          <div class="macro-name">INDIA INFLATION</div>
+          <div id="macroCPI" style="font-size:12px;font-weight:700;font-family:'Space Mono',monospace">—</div>
+        </div>
+        <span id="macroCPIBadge" class="badge badge-amber" style="font-size:8px">—</span>
+      </div>
+
+      <div class="macro-item">
+        <div>
+          <div class="macro-name">CREDIT GROWTH</div>
+          <div id="macroCredit" style="font-size:12px;font-weight:700;font-family:'Space Mono',monospace">—</div>
+        </div>
+        <span id="macroCreditBadge" class="badge badge-green" style="font-size:8px">—</span>
+      </div>
+
+      <div class="macro-item">
+        <div>
+          <div class="macro-name">INDIA GDP</div>
+          <div id="macroGDP" style="font-size:12px;font-weight:700;font-family:'Space Mono',monospace">—</div>
+        </div>
+        <span id="macroGDPBadge" class="badge badge-green" style="font-size:8px">—</span>
+      </div>
+
+      <div class="macro-item">
+        <div>
+          <div class="macro-name">INDIA VIX</div>
+          <div id="macroVIX" style="font-size:12px;font-weight:700;font-family:'Space Mono',monospace">—</div>
+        </div>
+        <span id="macroVIXBadge" class="badge badge-green" style="font-size:8px">—</span>
+      </div>
+
+      <div class="macro-item">
+        <div>
+          <div class="macro-name">DAYS TO EARNINGS</div>
+          <div id="macroEarnDays" style="font-size:12px;font-weight:700;font-family:'Space Mono',monospace;color:var(--text3)">—</div>
+        </div>
+        <span id="macroEarnBadge" class="badge badge-amber" style="font-size:8px">—</span>
+      </div>
+
+      <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
+        <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">MACRO VERDICT</div>
+        <div id="macroVerdict" style="padding:6px;background:var(--green-dim);border:1px solid var(--green)33;text-align:center;font-size:11px;font-weight:700;color:var(--green)">
+          CONDUCIVE TO LONG
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /row3 -->
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- ROW 5: BOTTOM PANELS                                   -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div class="row5">
+
+    <!-- UNIVERSE RANKING -->
+    <div class="card">
+      <div class="card-label">
+        STOCK UNIVERSE · BANK SECTOR
+        <span class="badge badge-green" id="universeTopBadge">#1 HDFC</span>
+      </div>
+
+      <!-- column headers -->
+      <div style="display:grid;grid-template-columns:16px 1fr 48px 80px 40px;gap:6px;align-items:center;padding:0 0 4px;border-bottom:1px solid var(--border);margin-bottom:4px">
+        <span style="font-size:7px;color:var(--text3)">#</span>
+        <span style="font-size:7px;color:var(--text3)">BANK</span>
+        <span style="font-size:7px;color:var(--text3);text-align:right">SCORE</span>
+        <span style="font-size:7px;color:var(--text3);text-align:center">RS STRENGTH</span>
+        <span style="font-size:7px;color:var(--text3);text-align:right">SIZE</span>
+      </div>
+
+      <div id="universeList">
+        <div class="universe-row"><div class="uni-rank">1</div><div class="uni-name">HDFCBANK</div><div class="uni-score">—</div><div class="uni-bar"><div class="uni-fill" style="width:0%"></div></div><div class="uni-size">—</div></div>
+        <div class="universe-row"><div class="uni-rank">2</div><div class="uni-name">ICICIBANK</div><div class="uni-score">—</div><div class="uni-bar"><div class="uni-fill" style="width:0%"></div></div><div class="uni-size">—</div></div>
+        <div class="universe-row"><div class="uni-rank">3</div><div class="uni-name">KOTAKBANK</div><div class="uni-score">—</div><div class="uni-bar"><div class="uni-fill" style="width:0%"></div></div><div class="uni-size">—</div></div>
+        <div class="universe-row"><div class="uni-rank">4</div><div class="uni-name">AXISBANK</div>  <div class="uni-score">—</div><div class="uni-bar"><div class="uni-fill" style="width:0%"></div></div><div class="uni-size">—</div></div>
+        <div class="universe-row"><div class="uni-rank">5</div><div class="uni-name">INDUSINDBK</div><div class="uni-score">—</div><div class="uni-bar"><div class="uni-fill" style="width:0%"></div></div><div class="uni-size">—</div></div>
+      </div>
+    </div>
+
+    <!-- PORTFOLIO HEATMAP + RISK -->
+    <div class="card">
+      <div class="card-label">
+        PORTFOLIO · RISK HEAT MAP
+        <span id="portfRiskBadge" class="badge badge-green">SAFE</span>
+      </div>
+
+      <div style="text-align:center;margin:8px 0;">
+        <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">CAPITAL MODE</div>
+        <div id="portfCapitalMode" style="font-family:'Syne',sans-serif;font-weight:800;font-size:16px;color:var(--amber);letter-spacing:0.1em;margin-top:2px">—</div>
+        <div id="portfCapitalSub" style="font-size:9px;color:var(--text3)">—</div>
+      </div>
+
+      <div class="heat-grid">
+        <div class="heat-item">
+          <div class="hl">EXPOSURE</div>
+          <div class="hv" id="portfExposure" style="color:var(--amber)">—</div>
+        </div>
+        <div class="heat-item">
+          <div class="hl">OPEN TRADES</div>
+          <div class="hv" id="portfOpenTrades" style="color:var(--text)">0</div>
+        </div>
+        <div class="heat-item">
+          <div class="hl">TOTAL P&L</div>
+          <div class="hv" id="portfTotalPnl" style="color:var(--green)">—</div>
+        </div>
+        <div class="heat-item">
+          <div class="hl">CONSEC LOSSES</div>
+          <div class="hv" id="portfConsecLosses" style="color:var(--text)">0</div>
+        </div>
+        <div class="heat-item">
+          <div class="hl">WINS</div>
+          <div class="hv" id="portfWins" style="color:var(--green)">0</div>
+        </div>
+        <div class="heat-item">
+          <div class="hl">LOSSES</div>
+          <div class="hv" id="portfLosses" style="color:var(--red)">0</div>
+        </div>
+      </div>
+
+      <div style="margin-top:10px">
+        <div class="fii-row">
+          <span style="color:var(--text3)">MONTHLY P&L</span>
+          <span id="portfMonthPnl" style="color:var(--green);font-weight:700;font-family:'Space Mono',monospace">—</span>
+        </div>
+        <div class="fii-row">
+          <span style="color:var(--text3)">MONTHLY LOSS LIM.</span>
+          <span style="color:var(--text3);font-family:'Space Mono',monospace">5%</span>
+        </div>
+        <div class="fii-row">
+          <span style="color:var(--text3)">CONSEC. LOSSES</span>
+          <span id="portfConsecStatus" style="color:var(--green);font-weight:700">0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- PERFORMANCE STATS -->
+    <div class="card">
+      <div class="card-label">SYSTEM PERFORMANCE</div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+        <div style="text-align:center;padding:8px;border:1px solid var(--border);background:var(--bg3)">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">WIN RATE</div>
+          <div id="perfWinRate" style="font-family:'Space Mono',monospace;font-size:22px;font-weight:700;color:var(--green)">—</div>
+        </div>
+        <div style="text-align:center;padding:8px;border:1px solid var(--border);background:var(--bg3)">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">PROFIT FACTOR</div>
+          <div id="perfPF" style="font-family:'Space Mono',monospace;font-size:22px;font-weight:700;color:var(--green)">—</div>
+        </div>
+        <div style="text-align:center;padding:8px;border:1px solid var(--border);background:var(--bg3)">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">TOTAL TRADES</div>
+          <div id="perfTotal" style="font-family:'Space Mono',monospace;font-size:22px;font-weight:700;color:var(--cyan)">0</div>
+        </div>
+        <div style="text-align:center;padding:8px;border:1px solid var(--border);background:var(--bg3)">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">TOTAL P&L</div>
+          <div id="perfTotalPnl" style="font-family:'Space Mono',monospace;font-size:22px;font-weight:700;color:var(--green)">—</div>
+        </div>
+      </div>
+
+      <div class="fii-row">
+        <span style="color:var(--text3)">WINS / LOSSES</span>
+        <span id="perfWinsLosses" style="font-weight:700;font-family:'Space Mono',monospace"><span style="color:var(--green)">0</span> / <span style="color:var(--red)">0</span></span>
+      </div>
+      <div class="fii-row">
+        <span style="color:var(--text3)">AVG WIN</span>
+        <span id="perfAvgWin" style="color:var(--green);font-weight:700;font-family:'Space Mono',monospace">—</span>
+      </div>
+      <div class="fii-row">
+        <span style="color:var(--text3)">AVG LOSS</span>
+        <span id="perfAvgLoss" style="color:var(--red);font-weight:700;font-family:'Space Mono',monospace">—</span>
+      </div>
+      <div class="fii-row">
+        <span style="color:var(--text3)">MONTHLY P&L</span>
+        <span id="perfMonthPnl" style="color:var(--green);font-weight:700;font-family:'Space Mono',monospace">—</span>
+      </div>
+      <div class="fii-row">
+        <span style="color:var(--text3)">SHARPE RATIO</span>
+        <span id="perfSharpe" style="color:var(--text3);font-weight:700;font-family:'Space Mono',monospace">—</span>
+      </div>
+      <div class="fii-row">
+        <span style="color:var(--text3)">MODEL RETRAIN</span>
+        <span style="color:var(--text3);font-family:'Space Mono',monospace">SUN 00:00</span>
+      </div>
+    </div>
+
+    <!-- PSYCHOLOGY + SYSTEM ALERTS -->
+    <div class="card">
+      <div class="card-label">
+        PSYCHOLOGY TRACKER
+        <span class="badge badge-green">GOOD</span>
+      </div>
+
+      <div class="psych-meter">
+        <div class="psych-item">
+          <div class="psych-header">
+            <span>DISCIPLINE SCORE</span>
+            <span style="color:var(--green);font-weight:700">82%</span>
+          </div>
+          <div class="psych-bar"><div class="psych-fill" style="width:82%;background:var(--green)"></div></div>
+        </div>
+        <div class="psych-item">
+          <div class="psych-header">
+            <span>SIGNAL ADHERENCE</span>
+            <span style="color:var(--green);font-weight:700">91%</span>
+          </div>
+          <div class="psych-bar"><div class="psych-fill" style="width:91%;background:var(--green)"></div></div>
+        </div>
+        <div class="psych-item">
+          <div class="psych-header">
+            <span>EARLY EXIT BIAS</span>
+            <span style="color:var(--amber);font-weight:700">LOW</span>
+          </div>
+          <div class="psych-bar"><div class="psych-fill" style="width:25%;background:var(--amber)"></div></div>
+        </div>
+        <div class="psych-item">
+          <div class="psych-header">
+            <span>OVERTRADING RISK</span>
+            <span style="color:var(--green);font-weight:700">LOW</span>
+          </div>
+          <div class="psych-bar"><div class="psych-fill" style="width:15%;background:var(--green)"></div></div>
+        </div>
+        <div class="psych-item">
+          <div class="psych-header">
+            <span>LOSS AVERSION</span>
+            <span style="color:var(--green);font-weight:700">NORMAL</span>
+          </div>
+          <div class="psych-bar"><div class="psych-fill" style="width:30%;background:var(--green)"></div></div>
+        </div>
+      </div>
+
+      <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px;">
+        <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">SYSTEM ALERTS</div>
+        <div class="alert-item">
+          <div class="alert-icon" style="background:var(--amber)"></div>
+          <div class="alert-text">Earnings in 18 days — reduce position size by 50% after Day 12</div>
+          <div class="alert-time">NOW</div>
+        </div>
+        <div class="alert-item">
+          <div class="alert-icon" style="background:var(--green)"></div>
+          <div class="alert-text">Model retrained Sunday — accuracy improved to 62%</div>
+          <div class="alert-time">2D AGO</div>
+        </div>
+        <div class="alert-item">
+          <div class="alert-icon" style="background:var(--blue)"></div>
+          <div class="alert-text">BSE filing detected — HDFC debt raising plan approved. LLM classified: BULLISH</div>
+          <div class="alert-time">24M AGO</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /row5 -->
+
+  <!-- ALTERNATIVE DATA + LLM SCORES -->
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:0">
+
+    <!-- ALTERNATIVE DATA -->
+    <div class="card">
+      <div class="card-label">ALTERNATIVE DATA · GOOGLE TRENDS</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div>
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">SEARCH INTEREST TREND</div>
+          <div class="fii-row"><span style="color:var(--text3)">HDFC Home Loan</span><span style="color:var(--green);font-weight:700">+18% ▲</span></div>
+          <div class="fii-row"><span style="color:var(--text3)">HDFC Credit Card</span><span style="color:var(--green);font-weight:700">+12% ▲</span></div>
+          <div class="fii-row"><span style="color:var(--text3)">HDFC Bank Account</span><span style="color:var(--amber);font-weight:700">+4% →</span></div>
+          <div class="fii-row"><span style="color:var(--text3)">HDFC Personal Loan</span><span style="color:var(--green);font-weight:700">+22% ▲</span></div>
+          <div style="margin-top:8px;padding:6px;background:var(--green-dim);border:1px solid var(--green)33;text-align:center">
+            <div style="font-size:8px;color:var(--text3)">DEMAND SIGNAL</div>
+            <div style="font-size:12px;font-weight:700;color:var(--green)">GROWING ▲</div>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">HIRING ACTIVITY</div>
+          <div style="padding:10px;border:1px solid var(--border);background:var(--bg3);text-align:center;margin-bottom:8px">
+            <div style="font-size:8px;color:var(--text3)">JOB POSTINGS TREND</div>
+            <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:18px;color:var(--green);margin-top:4px">EXPANSION</div>
+            <div style="font-size:9px;color:var(--text3);margin-top:2px">+24% vs 4 weeks ago</div>
+          </div>
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:4px">INSIDER ACTIVITY</div>
+          <div class="fii-row"><span style="color:var(--text3)">Promoter Holding</span><span style="font-weight:700">25.8%</span></div>
+          <div class="fii-row"><span style="color:var(--text3)">QoQ Change</span><span style="color:var(--green);font-weight:700">+0.0%</span></div>
+          <div class="fii-row"><span style="color:var(--text3)">Bulk Deals</span><span style="color:var(--green);font-weight:700">NET BUY</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- LLM SCORES -->
+    <div class="card">
+      <div class="card-label">
+        LLM INTELLIGENCE · TEXT ANALYSIS
+        <span class="badge badge-cyan">CLAUDE</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+        <div style="padding:10px;border:1px solid var(--green);background:var(--green-dim);text-align:center">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">EARNINGS SCORE</div>
+          <div id="llmEarnScore" style="font-family:'Space Mono',monospace;font-size:24px;font-weight:700;color:var(--green)">—</div>
+          <div style="font-size:8px;color:var(--text3);margin-top:2px">LATEST QUARTERLY</div>
+        </div>
+        <div style="padding:10px;border:1px solid var(--blue);background:var(--blue-dim);text-align:center">
+          <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">ANNC. SCORE</div>
+          <div id="llmAnnScore" style="font-family:'Space Mono',monospace;font-size:24px;font-weight:700;color:var(--blue)">—</div>
+          <div style="font-size:8px;color:var(--text3);margin-top:2px">LATEST FILING</div>
+        </div>
+      </div>
+
+      <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">LATEST LLM ANALYSIS</div>
+      <div id="llmText" style="padding:8px;border:1px solid var(--border);background:var(--bg3);font-size:10px;color:var(--text2);line-height:1.6;border-left:2px solid var(--cyan)">
+        Waiting for LLM analysis data...
+      </div>
+
+      <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
+        <div style="text-align:center;padding:6px;border:1px solid var(--border);background:var(--bg3)">
+          <div style="font-size:8px;color:var(--text3)">COMBINED</div>
+          <div id="llmCombined" style="font-size:14px;font-weight:700;font-family:'Space Mono',monospace;color:var(--green)">—</div>
+        </div>
+        <div style="text-align:center;padding:6px;border:1px solid var(--border);background:var(--bg3)">
+          <div style="font-size:8px;color:var(--text3)">API CALLS</div>
+          <div style="font-size:14px;font-weight:700;font-family:'Space Mono',monospace;color:var(--cyan)">5/mo</div>
+        </div>
+        <div style="text-align:center;padding:6px;border:1px solid var(--border);background:var(--bg3)">
+          <div style="font-size:8px;color:var(--text3)">COST</div>
+          <div style="font-size:14px;font-weight:700;font-family:'Space Mono',monospace;color:var(--amber)">₹80</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SMART EXIT ENGINE -->
+    <div class="card">
+      <div class="card-label">
+        SMART EXIT ENGINE · MONITORING
+        <span class="badge badge-green blink">● ACTIVE</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+        <div style="padding:8px;border:1px solid var(--border);background:var(--bg3);text-align:center">
+          <div style="font-size:8px;color:var(--text3)">OPEN TRADE</div>
+          <div id="exitDirection" style="font-family:'Syne',sans-serif;font-weight:800;font-size:16px;color:var(--text3);margin-top:2px">NO TRADE</div>
+          <div id="exitDaysHeld" style="font-size:9px;color:var(--text3);margin-top:2px">—</div>
+        </div>
+        <div style="padding:8px;border:1px solid var(--green);background:var(--green-dim);text-align:center">
+          <div style="font-size:8px;color:var(--text3)">UNREALIZED P&L</div>
+          <div id="exitPnl" style="font-family:'Space Mono',monospace;font-weight:700;font-size:16px;color:var(--text3);margin-top:2px">—</div>
+          <div id="exitTrailStop" style="font-size:9px;color:var(--text3);margin-top:2px">Trail: —</div>
+        </div>
+      </div>
+
+      <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">EXIT CONDITIONS · STATUS</div>
+
+      <div id="exitConditions">
+        <div style="color:var(--text3);font-size:9px;padding:6px 0">No open trade — conditions will appear when a position is active.</div>
+      </div>
+
+      <div style="margin-top:8px;padding:8px;background:var(--bg3);border:1px solid var(--border);text-align:center">
+        <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em">EXIT RECOMMENDATION</div>
+        <div id="exitRecommendation" style="font-size:12px;font-weight:700;color:var(--text3);margin-top:4px">NO OPEN POSITION</div>
+      </div>
+    </div>
+
+  </div>
+
+</div><!-- /main -->
+
+<script>
+let selectedTicker = localStorage.getItem('qe_ticker') || 'HDFCBANK.NS';
+let liveData = null;
+let chartCandles = [];
+let currentPeriod = '1d';
+
+// Restore dropdown to persisted selection
+document.addEventListener('DOMContentLoaded', function() {
+  const sel = document.getElementById('bankSelect');
+  if (sel) sel.value = selectedTicker;
+  const badge = document.getElementById('tickerBadge');
+  if (badge) badge.textContent = selectedTicker.replace('.NS','') + ' · NSE';
+});
+
+function buildApiUrl(path) {
+  const base = path || '/api/live';
+  return `http://localhost:8000${base}?ticker=${encodeURIComponent(selectedTicker)}`;
+}
+
+let _bankSwitchTimer = null;
+document.getElementById('bankSelect').addEventListener('change', function() {
+  selectedTicker = this.value;
+  localStorage.setItem('qe_ticker', selectedTicker);
+  const badge = document.getElementById('tickerBadge');
+  if (badge) badge.textContent = selectedTicker.replace('.NS','') + ' · NSE';
+  clearTimeout(_bankSwitchTimer);
+  _bankSwitchTimer = setTimeout(fetchLive, 200);
+});
+
+// ── CLOCK + MARKET STATUS ──
+function updateClock() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2,'0');
+  const m = String(now.getMinutes()).padStart(2,'0');
+  const s = String(now.getSeconds()).padStart(2,'0');
+  document.getElementById('clock').textContent = `${h}:${m}:${s}`;
+  updateMarketBadge();
+}
+setInterval(updateClock, 1000);
+updateClock();   // run immediately on page load — badge shows correct state before first API poll
+
+// ── HELPERS ──
+function f2(v) { return (v !== null && v !== undefined) ? parseFloat(v).toFixed(2) : '—'; }
+function f1(v) { return (v !== null && v !== undefined) ? parseFloat(v).toFixed(1) : '—'; }
+function pct(v) { return (v !== null && v !== undefined) ? `${parseFloat(v).toFixed(1)}%` : '—%'; }
+function fx(v, d=0) { return (v !== null && v !== undefined) ? parseFloat(v).toFixed(d) : '—'; }
+function setEl(id, text) { const el = document.getElementById(id); if (el) el.textContent = text; }
+function setHtml(id, html) { const el = document.getElementById(id); if (el) el.innerHTML = html; }
+function colorClass(v) { return parseFloat(v) >= 0 ? 'var(--green)' : 'var(--red)'; }
+function colorEl(id, v) { const el = document.getElementById(id); if (el) el.style.color = colorClass(v); }
+function signArrow(v) { return parseFloat(v) >= 0 ? '▲' : '▼'; }
+
+// ── TICKER STRIP ──
+function buildTicker(d) {
+  const g = d.global || {};
+  const qVal = (q, fmt) => (q && q.price > 0) ? fmt(q.price) : '—';
+  const items = [
+    { label: selectedTicker.replace('.NS',''), val: qVal(d.selected_bank, p => `₹${f2(p)}`), chg: d.selected_bank ? d.selected_bank.change_pct : 0 },
+    { label: 'ICICIBANK', val: qVal(g.icicibank, p => `₹${f2(p)}`),                          chg: g.icicibank ? g.icicibank.change_pct : 0 },
+    { label: 'KOTAKBANK', val: qVal(g.kotakbank, p => `₹${f2(p)}`),                          chg: g.kotakbank ? g.kotakbank.change_pct : 0 },
+    { label: 'AXISBANK',  val: qVal(g.axisbank,  p => `₹${f2(p)}`),                          chg: g.axisbank  ? g.axisbank.change_pct  : 0 },
+    { label: 'INDUSINDBK',val: qVal(g.indusindbk,p => `₹${f2(p)}`),                          chg: g.indusindbk? g.indusindbk.change_pct: 0 },
+    { label: 'BANKNIFTY', val: qVal(g.banknifty, p => `₹${Math.round(p).toLocaleString('en-IN')}`), chg: g.banknifty ? g.banknifty.change_pct : 0 },
+    { label: 'NIFTY50',   val: qVal(g.nifty50,   p => `₹${Math.round(p).toLocaleString('en-IN')}`), chg: g.nifty50 ? g.nifty50.change_pct : 0 },
+    { label: 'USD/INR',   val: qVal(g.usdinr_live,p => `₹${f2(p)}`),                         chg: g.usdinr_live ? g.usdinr_live.change_pct : 0 },
+    { label: 'CRUDE OIL', val: qVal(g.crude_live, p => `$${f2(p)}`),                          chg: g.crude_live ? g.crude_live.change_pct : 0 },
+    { label: 'INDIA VIX', val: qVal(g.indiavix,   p => f2(p)),                                chg: g.indiavix ? g.indiavix.change_pct : 0 },
+    { label: 'GOLD',      val: qVal(g.gold_live,  p => `$${Math.round(p).toLocaleString()}`), chg: g.gold_live ? g.gold_live.change_pct : 0 },
+    { label: 'S&P500',    val: qVal(g.sp500_live, p => Math.round(p).toLocaleString()),       chg: g.sp500_live ? g.sp500_live.change_pct : 0 },
+  ];
+  const html = [...items, ...items].map(it => {
+    const c = parseFloat(it.chg||0) >= 0 ? 'var(--green)' : 'var(--red)';
+    const sign = parseFloat(it.chg||0) >= 0 ? '+' : '';
+    return `<span class="ticker-item"><span class="ts">${it.label}</span><span class="tv" style="color:${c}">${it.val}</span><span style="color:${c};font-size:9px">${sign}${f2(it.chg)}%</span></span>`;
+  }).join('');
+  setHtml('tickerScroll', html);
+}
+
+// ── PRICE HERO ──
+function updatePriceHero(d) {
+  const h = d.selected_bank || {};
+  const sig = d.signal || {};
+  const tr = d.trade || {};
+  const price = h.price || 0;
+  const chg   = h.change || 0;
+  const chgPct= h.change_pct || 0;
+  const arrow = chg >= 0 ? '▲' : '▼';
+  const col   = chg >= 0 ? 'var(--green)' : 'var(--red)';
+  const lp = document.getElementById('livePrice');
+  if (lp) {
+    lp.textContent = price > 0
+      ? `₹${price.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2})}`
+      : '—';
+    lp.style.color = price > 0 ? col : 'var(--text3)';
+  }
+  const pc = document.getElementById('priceChange');
+  if (pc) {
+    pc.textContent = price > 0
+      ? `${arrow} ${chg >= 0 ? '+' : ''}${f2(chg)} · ${chgPct >= 0 ? '+' : ''}${f2(chgPct)}%`
+      : 'price unavailable';
+    pc.style.color = price > 0 ? col : 'var(--text3)';
+  }
+  setEl('priceHigh',    h.high        ? `₹${f2(h.high)}`        : '—');
+  setEl('priceLow',     h.low         ? `₹${f2(h.low)}`         : '—');
+  setEl('volRatio',     h.vol_ratio   ? `${f2(h.vol_ratio)}x AVG` : '—');
+  setEl('price52wHigh', h.week52_high ? `₹${Math.round(h.week52_high).toLocaleString('en-IN')}` : '—');
+  setEl('priceRSI',     '—');
+  setEl('priceATR',     '—');
+  const dir = sig.direction || 'FLAT';
+  const sb = document.getElementById('signalBig');
+  if (sb) {
+    sb.textContent = dir;
+    sb.className = 'signal-big ' + (dir === 'LONG' ? 'signal-long' : dir === 'SHORT' ? 'signal-short' : 'signal-flat');
+  }
+  const conf = sig.confidence || 0;
+  setEl('confPct', `${Math.round(conf)}%`);
+  const cf = document.getElementById('confFill');
+  if (cf) {
+    cf.style.width = `${conf}%`;
+    cf.className = 'conf-fill ' + (dir === 'LONG' ? 'conf-fill-green' : dir === 'SHORT' ? 'conf-fill-red' : 'conf-fill-amber');
+  }
+  const cp = document.getElementById('confPct');
+  if (cp) cp.style.color = dir === 'LONG' ? 'var(--green)' : dir === 'SHORT' ? 'var(--red)' : 'var(--amber)';
+  if (tr.active) {
+    setEl('tradeEntry',  tr.entry  ? `₹${f2(tr.entry)}`  : '—');
+    setEl('tradeStop',   tr.stop   ? `₹${f2(tr.stop)}`   : '—');
+    setEl('tradeTarget', tr.target ? `₹${f2(tr.target)}` : '—');
+    const rr = (tr.entry && tr.stop && tr.target)
+      ? Math.abs((tr.target - tr.entry) / (tr.entry - tr.stop))
+      : 0;
+    setEl('tradeRR', rr > 0 ? `${rr.toFixed(1)} : 1` : '—');
+  } else {
+    setEl('tradeEntry', '—'); setEl('tradeStop', '—'); setEl('tradeTarget', '—'); setEl('tradeRR', '—');
+  }
+  // Bank name labels (update when ticker changes)
+  const ticker = (d.selected_ticker || 'HDFCBANK.NS').replace('.NS','');
+  const bankLabel = ticker.replace('BANK','').replace('IND','IND ');
+  setEl('priceHeroBank', ticker);
+  setEl('chartBankLabel', ticker);
+}
+
+// ── CLIENT-SIDE NSE MARKET STATUS ──────────────────────────────────
+// Runs every second — no dependency on the API server at all.
+// NSE_HOLIDAYS_2026 is defined inside the function to avoid TDZ issues
+// (updateClock runs before module-scope consts are initialized).
+
+function getNseMarketStatus() {
+  const HOLIDAYS = new Set([
+    '2026-01-26','2026-03-25','2026-04-02','2026-04-14',
+    '2026-04-17','2026-05-01','2026-08-15','2026-10-02',
+    '2026-10-20','2026-11-04','2026-12-25'
+  ]);
+  const now   = new Date();
+  // Convert to IST (UTC+5:30) without relying on browser locale
+  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+  const ist   = new Date(utcMs + 5.5 * 3600000);
+  const ymd   = [
+    ist.getFullYear(),
+    String(ist.getMonth() + 1).padStart(2, '0'),
+    String(ist.getDate()).padStart(2, '0'),
+  ].join('-');
+  const day = ist.getDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6)     return 'CLOSED';
+  if (HOLIDAYS.has(ymd))         return 'CLOSED';
+  const mins = ist.getHours() * 60 + ist.getMinutes();
+  if (mins >= 540 && mins < 555) return 'PRE-MARKET'; // 09:00–09:15
+  if (mins >= 555 && mins < 930) return 'OPEN';       // 09:15–15:30
+  return 'CLOSED';
+}
+
+function updateMarketBadge() {
+  const s   = getNseMarketStatus();
+  const msb = document.getElementById('marketStatusBadge');
+  const hm  = document.getElementById('priceHeroMode');
+  if (!msb) return;
+  if (s === 'OPEN') {
+    msb.textContent  = '● MARKET OPEN';
+    msb.className    = 'badge badge-green blink';
+    if (hm) hm.textContent = 'LIVE';
+  } else if (s === 'PRE-MARKET') {
+    msb.textContent  = '● PRE-MARKET';
+    msb.className    = 'badge badge-amber';
+    if (hm) hm.textContent = 'PRE';
+  } else {
+    msb.textContent  = '● MARKET CLOSED';
+    msb.className    = 'badge badge-grey';
+    if (hm) hm.textContent = 'CLOSED';
+  }
+}
+
+// ── REGIME ──
+function updateRegime(d) {
+  const r = d.regime || {};
+  const sig = d.signal || {};
+  const name = r.name || 'UNKNOWN';
+  const rn = document.getElementById('regimeName');
+  if (rn) {
+    rn.innerHTML = name.replace('_', '<br>');
+    rn.style.color = name.includes('BULL') ? 'var(--green)' : name.includes('BEAR') ? 'var(--red)' : name.includes('HIGH_VOL') ? 'var(--amber)' : 'var(--text3)';
+  }
+  const stab = r.stability || 0;
+  setEl('stabilityPct', `${Math.round(stab)}%`);
+  const sf = document.getElementById('stabilityFill');
+  if (sf) sf.style.width = `${stab}%`;
+  const bull   = r.bull_prob   || 0;
+  const bear   = r.bear_prob   || 0;
+  const hv     = r.hv_prob     || 0;
+  const choppy = r.choppy_prob || 0;
+  const setBar = (fillId, valId, val, color) => {
+    const f = document.getElementById(fillId); if (f) { f.style.width = `${val}%`; f.style.background = color; }
+    const v = document.getElementById(valId);  if (v) { v.textContent = `${Math.round(val)}%`; v.style.color = color; }
+  };
+  setBar('bullFill',   'bullVal',   bull,   'var(--green)');
+  setBar('bearFill',   'bearVal',   bear,   'var(--red)');
+  setBar('hvFill',     'hvVal',     hv,     'var(--amber)');
+  setBar('choppyFill', 'choppyVal', choppy, 'var(--text3)');
+  const align = sig.alignment || '';
+  const ag = document.getElementById('alignGrade');
+  if (ag) {
+    ag.textContent = align || '—';
+    ag.style.color = align === 'A+' || align === 'A' ? 'var(--green)' : align === 'B' ? 'var(--amber)' : align === 'F' ? 'var(--red)' : 'var(--text3)';
+  }
+  const ad = document.getElementById('alignDesc');
+  if (ad) ad.textContent = align === 'A+' ? 'ALL TIMEFRAMES AGREE' : align === 'F' ? 'NO ALIGNMENT — FLAT' : align ? `PARTIAL · GRADE ${align}` : '—';
+
+  const mod = d.models || {};
+  const posS = (mod.positional || {}).signal; const swgS = (mod.swing || {}).signal; const intS = (mod.intraday || {}).signal;
+  const arrowOf = s => s === 'LONG' ? '▲' : s === 'SHORT' ? '▼' : '—';
+  const modelRow = document.getElementById('alignModelRow');
+  if (modelRow) {
+    modelRow.innerHTML = `POSITIONAL ${arrowOf(posS)} · SWING ${arrowOf(swgS)} · INTRADAY ${arrowOf(intS)}<br>
+      <span id="alignBoost" style="color:${align?'var(--green)':'var(--text3)'}">
+        ${align && align !== 'F' ? 'MODELS ACTIVE' : align === 'F' ? 'NO ALIGNMENT' : 'awaiting signal'}
+      </span>`;
+  }
+}
+
+// ── CHART — Interactive Candlestick ──
+const CHART_PAD = { l: 52, r: 14, t: 12, b: 28 };
+let _chartHoverIdx = -1;
+
+function _fmtCandleTime(ts) {
+  if (!ts) return '';
+  try {
+    const iso = String(ts).replace(' ', 'T');
+    const d = new Date(iso);
+    if (isNaN(d)) return iso.slice(11, 16);
+    const h  = d.getHours().toString().padStart(2,'0');
+    const m  = d.getMinutes().toString().padStart(2,'0');
+    const mo = (d.getMonth()+1).toString().padStart(2,'0');
+    const dy = d.getDate().toString().padStart(2,'0');
+    const yr = String(d.getFullYear()).slice(2);
+    if (currentPeriod === '5m' || currentPeriod === '15m') return `${h}:${m}`;
+    if (currentPeriod === '1d') return `${dy}/${mo}/${yr}`;
+    if (currentPeriod === '1w') return `${dy}/${mo}/${yr}`;
+    return `${mo}/${yr}`;  // 1m: month/year
+  } catch { return ''; }
+}
+
+function _updateChartStats(c) {
+  if (!c) return;
+  setEl('chartOpen', `₹${f2(c.o)}`);
+  setEl('chartHigh', `₹${f2(c.h)}`);
+  setEl('chartLow',  `₹${f2(c.l)}`);
+  const v = c.v || 0;
+  setEl('chartVol', v > 1e6 ? `${(v/1e6).toFixed(1)}M` : v > 1e3 ? `${Math.round(v/1e3)}K` : String(v));
+}
+
+function drawChart(candles, hoverIdx) {
+  const canvas = document.getElementById('priceChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  // Read offsetWidth AFTER requestAnimationFrame so layout is complete
+  const W = Math.max(canvas.offsetWidth || canvas.parentElement?.offsetWidth || 0, 200);
+  const H = 220;
+  canvas.width  = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  canvas.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
+
+  // Always draw a visible background so the chart area is never blank
+  ctx.fillStyle = '#111318';
+  ctx.fillRect(0, 0, W, H);
+
+  if (!candles || candles.length < 2) {
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Chart data loading…', W / 2, H / 2);
+    return;
+  }
+
+  const n   = candles.length;
+  const PAD = CHART_PAD;
+  const CW  = W - PAD.l - PAD.r;   // chart area width
+  const CH  = H - PAD.t - PAD.b;   // chart area height
+  const VOL_H = Math.floor(CH * 0.18);  // bottom 18% for volume
+  const PRC_H = CH - VOL_H - 4;        // remaining for price
+
+  // Price range (add 3% padding)
+  const highs = candles.map(c => c.h), lows = candles.map(c => c.l);
+  const rawMax = Math.max(...highs), rawMin = Math.min(...lows);
+  const pad3 = (rawMax - rawMin) * 0.03;
+  const priceMax = rawMax + pad3, priceMin = rawMin - pad3;
+  const priceRng = priceMax - priceMin || 1;
+
+  const px = i => PAD.l + (i + 0.5) * (CW / n);
+  const py = p => PAD.t + PRC_H - ((p - priceMin) / priceRng) * PRC_H;
+
+  // ── Grid lines ──
+  ctx.strokeStyle = 'rgba(30,35,48,0.9)'; ctx.lineWidth = 1;
+  const gridSteps = 4;
+  for (let i = 0; i <= gridSteps; i++) {
+    const gp = priceMin + (i / gridSteps) * priceRng;
+    const gy = py(gp);
+    ctx.beginPath(); ctx.moveTo(PAD.l, gy); ctx.lineTo(W - PAD.r, gy); ctx.stroke();
+    ctx.fillStyle = '#4a5568'; ctx.font = '8.5px DM Mono'; ctx.textAlign = 'right';
+    ctx.fillText('₹' + gp.toFixed(0), PAD.l - 3, gy + 3);
+  }
+
+  // ── Volume bars ──
+  const maxVol = Math.max(...candles.map(c => c.v || 0), 1);
+  const candleW = Math.max(1, CW / n - 2);
+  for (let i = 0; i < n; i++) {
+    const isUp = candles[i].c >= candles[i].o;
+    ctx.fillStyle = isUp ? 'rgba(0,230,118,0.22)' : 'rgba(255,61,87,0.22)';
+    const bh = ((candles[i].v || 0) / maxVol) * VOL_H;
+    const bx = px(i) - candleW / 2;
+    const by = PAD.t + PRC_H + 4 + VOL_H - bh;
+    ctx.fillRect(bx, by, candleW, bh);
+  }
+
+  // ── EMA(9) overlay ──
+  ctx.beginPath();
+  let ema = candles[0].c, k = 2 / (9 + 1);
+  for (let i = 0; i < n; i++) {
+    ema = candles[i].c * k + ema * (1 - k);
+    if (i === 0) ctx.moveTo(px(i), py(ema)); else ctx.lineTo(px(i), py(ema));
+  }
+  ctx.strokeStyle = 'rgba(41,121,255,0.45)'; ctx.lineWidth = 1.2;
+  ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
+
+  // ── Candlesticks ──
+  for (let i = 0; i < n; i++) {
+    const c = candles[i];
+    const isUp = c.c >= c.o;
+    const hovered = (hoverIdx === i);
+    const bull = isUp ? '#00e676' : '#ff3d57';
+    const bodyAlpha = hovered ? 1.0 : 0.85;
+
+    ctx.globalAlpha = bodyAlpha;
+
+    // Wick
+    ctx.strokeStyle = isUp ? 'rgba(0,230,118,0.7)' : 'rgba(255,61,87,0.7)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px(i), py(c.h));
+    ctx.lineTo(px(i), py(c.l));
+    ctx.stroke();
+
+    // Body
+    const top  = py(Math.max(c.o, c.c));
+    const bot  = py(Math.min(c.o, c.c));
+    const bodyH = Math.max(1, bot - top);
+    ctx.fillStyle = hovered
+      ? (isUp ? '#00e676' : '#ff3d57')
+      : (isUp ? 'rgba(0,230,118,0.75)' : 'rgba(255,61,87,0.75)');
+    ctx.fillRect(px(i) - candleW / 2, top, candleW, bodyH);
+  }
+  ctx.globalAlpha = 1.0;
+
+  // ── X-axis time labels (show ~6 evenly spaced) ──
+  ctx.fillStyle = '#4a5568'; ctx.font = '8px DM Mono'; ctx.textAlign = 'center';
+  const labelCount = Math.min(6, n);
+  for (let li = 0; li < labelCount; li++) {
+    const idx = Math.round(li * (n - 1) / Math.max(labelCount - 1, 1));
+    const ts  = candles[idx] && candles[idx].t;
+    ctx.fillText(_fmtCandleTime(ts), px(idx), H - 6);
+  }
+
+  // ── Crosshair + tooltip for hovered candle ──
+  if (hoverIdx >= 0 && hoverIdx < n) {
+    const hc = candles[hoverIdx];
+    const cx = px(hoverIdx);
+    const cy = py(hc.c);
+
+    // Crosshair lines
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx, PAD.t); ctx.lineTo(cx, PAD.t + PRC_H); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PAD.l, cy); ctx.lineTo(W - PAD.r, cy); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Price label on Y-axis
+    ctx.fillStyle = '#2d3748';
+    ctx.fillRect(0, cy - 9, PAD.l - 3, 18);
+    ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 8px DM Mono'; ctx.textAlign = 'right';
+    ctx.fillText('₹' + hc.c.toFixed(0), PAD.l - 4, cy + 3);
+
+    // Tooltip box
+    const isUp = hc.c >= hc.o;
+    const lines = [
+      _fmtCandleTime(hc.t),
+      `O ₹${f2(hc.o)}  C ₹${f2(hc.c)}`,
+      `H ₹${f2(hc.h)}  L ₹${f2(hc.l)}`,
+      `Vol: ${hc.v > 1e6 ? (hc.v/1e6).toFixed(2)+'M' : hc.v > 1e3 ? Math.round(hc.v/1e3)+'K' : hc.v}`,
+    ];
+    const TW = 130, TH = 60, TPAD = 6;
+    let tx = cx + 8;
+    if (tx + TW > W - PAD.r) tx = cx - TW - 8;
+    let ty = Math.max(PAD.t, cy - TH / 2);
+    if (ty + TH > PAD.t + PRC_H) ty = PAD.t + PRC_H - TH;
+
+    ctx.fillStyle = 'rgba(15,20,32,0.92)';
+    ctx.strokeStyle = isUp ? '#00e676' : '#ff3d57';
+    ctx.lineWidth = 1;
+    _roundRect(ctx, tx, ty, TW, TH, 4);
+    ctx.fill(); ctx.stroke();
+
+    ctx.font = '8px DM Mono'; ctx.textAlign = 'left';
+    lines.forEach((line, i) => {
+      ctx.fillStyle = i === 0 ? '#a0aec0' : (i === 1 ? (isUp ? '#00e676' : '#ff3d57') : '#e2e8f0');
+      ctx.fillText(line, tx + TPAD, ty + TPAD + 11 + i * 13);
+    });
+  }
+
+  // Update stat bar from last candle (or hovered)
+  const statIdx = hoverIdx >= 0 ? hoverIdx : n - 1;
+  _updateChartStats(candles[statIdx]);
+  if (hoverIdx < 0) {
+    const high = Math.max(...candles.map(c=>c.h)), low = Math.min(...candles.map(c=>c.l));
+    const totalVol = candles.reduce((s,c) => s+(c.v||0), 0);
+    setEl('chartOpen', `₹${f2(candles[0].o)}`);
+    setEl('chartHigh', `₹${f2(high)}`);
+    setEl('chartLow',  `₹${f2(low)}`);
+    setEl('chartVol',  totalVol > 1e6 ? `${(totalVol/1e6).toFixed(1)}M` : `${Math.round(totalVol/1e3)}K`);
+  }
+}
+
+function _roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y); ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+  ctx.lineTo(x+w, y+h-r); ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  ctx.lineTo(x+r, y+h); ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+  ctx.lineTo(x, y+r); ctx.quadraticCurveTo(x, y, x+r, y);
+  ctx.closePath();
+}
+
+// ── Canvas mouse events for crosshair ──
+(function() {
+  const canvas = document.getElementById('priceChart');
+  if (!canvas) return;
+
+  canvas.addEventListener('mousemove', function(e) {
+    if (!chartCandles || chartCandles.length < 2) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const n  = chartCandles.length;
+    const CW = canvas.width - CHART_PAD.l - CHART_PAD.r;
+    const rawIdx = Math.round((mx - CHART_PAD.l) / (CW / n) - 0.5);
+    const idx = Math.max(0, Math.min(n - 1, rawIdx));
+    if (idx !== _chartHoverIdx) {
+      _chartHoverIdx = idx;
+      drawChart(chartCandles, _chartHoverIdx);
+    }
+  });
+
+  canvas.addEventListener('mouseleave', function() {
+    if (_chartHoverIdx !== -1) {
+      _chartHoverIdx = -1;
+      drawChart(chartCandles, -1);
+    }
+  });
+})();
+
+// ── CHART BUTTONS ──
+document.querySelectorAll('.chart-btn').forEach(btn => {
+  btn.addEventListener('click', async function() {
+    document.querySelectorAll('.chart-btn').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    currentPeriod = this.textContent.trim().toLowerCase();
+
+    // 1d / 1w come from liveData (already fetched with /api/live)
+    if (currentPeriod === '1d' && liveData) {
+      chartCandles = liveData.chart_1d || [];
+      _chartHoverIdx = -1; requestAnimationFrame(() => drawChart(chartCandles, -1)); return;
+    }
+    if (currentPeriod === '1w' && liveData) {
+      chartCandles = liveData.chart_1w || [];
+      _chartHoverIdx = -1; requestAnimationFrame(() => drawChart(chartCandles, -1)); return;
+    }
+
+    // 5m / 15m / 1m require a separate API call
+    try {
+      const url = buildApiUrl(`/api/chart/${currentPeriod}`);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      chartCandles = json.data || [];
+      _chartHoverIdx = -1; requestAnimationFrame(() => drawChart(chartCandles, -1));
+    } catch (e) {
+      console.warn('Chart fetch failed:', e.message);
+    }
+  });
+});
+
+// ── NEWS ──
+function relTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts.replace(' ', 'T'));
+  if (isNaN(d)) return ts.slice(11, 16);
+  const mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 1)  return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24)  return `${hrs}h ${mins % 60}m ago`;
+  return `${Math.floor(hrs/24)}d ago`;
+}
+
+let _newsAll   = [];
+let _newsFilter = 'all';
+
+function _renderNewsFeed() {
+  const nf = document.getElementById('newsFeed');
+  if (!nf) return;
+  if (!_newsAll.length) {
+    nf.innerHTML = '<div style="color:var(--text3);font-size:10px;padding:10px 0">No news data yet — RSS feeds will populate on next cycle.</div>';
+    return;
+  }
+
+  let items = _newsAll;
+  if (_newsFilter === 'positive') items = _newsAll.filter(n => parseFloat(n.score||0) > 0.1);
+  else if (_newsFilter === 'negative') items = _newsAll.filter(n => parseFloat(n.score||0) < -0.1);
+  else if (_newsFilter === 'bse') items = _newsAll.filter(n => (n.source||'').toLowerCase().includes('bse') || (n.title||'').toLowerCase().includes('bse'));
+
+  if (!items.length) {
+    nf.innerHTML = `<div style="color:var(--text3);font-size:10px;padding:10px 0">No ${_newsFilter} articles in the last 24h.</div>`;
+    return;
+  }
+
+  nf.innerHTML = items.map(n => {
+    const raw    = n.score;
+    // Backend now sends explicit `scored` boolean (true when processed=1).
+    // Fall back to the old null-check for legacy responses.
+    const scored = (typeof n.scored === 'boolean')
+      ? n.scored
+      : (raw !== null && raw !== undefined && raw !== '');
+    const score  = scored ? parseFloat(raw) : null;
+    const isPos  = scored && score >  0.1;
+    const isNeg  = scored && score < -0.1;
+    const isWPos = scored && score >  0.005 && score <=  0.1;
+    const isWNeg = scored && score < -0.005 && score >= -0.1;
+    const sc     = isPos ? 'var(--green)' : isNeg ? 'var(--red)' : isWPos ? '#69f0ae88' : isWNeg ? '#ff6b7a88' : 'var(--text3)';
+    const barW   = scored ? Math.min(Math.abs(score) * 100, 100) : 0;
+    const barBg  = isPos ? 'var(--green)' : isNeg ? 'var(--red)' : isWPos ? '#69f0ae55' : isWNeg ? '#ff6b7a55' : 'var(--border2)';
+    const barStyle = (isNeg || isWNeg)
+      ? `width:${barW}%;background:${barBg};margin-left:auto`
+      : `width:${barW}%;background:${barBg}`;
+    const scoreLabel = !scored ? 'UNSCORED'
+      : isPos  ? `+${score.toFixed(2)}`
+      : isNeg  ? score.toFixed(2)
+      : isWPos ? `+${score.toFixed(2)}`
+      : isWNeg ? score.toFixed(2)
+      : 'NEUTRAL';
+    const isBSE = (n.source||'').toLowerCase().includes('bse');
+    const srcColor = isBSE ? 'var(--cyan)' : 'var(--text3)';
+    const titleHtml = n.link
+      ? `<a href="${n.link}" target="_blank" rel="noopener noreferrer">${n.title||''}</a>`
+      : (n.title || '');
+    return `<div class="news-item" onclick="if(!event.target.closest('a')&&'${n.link}')window.open('${n.link}','_blank')">
+      <div class="news-header">
+        <span class="news-source" style="color:${srcColor}">${(n.source||'').replace(/_/g,' ').toUpperCase()}</span>
+        <span class="news-time">${relTime(n.time)}</span>
+      </div>
+      <div class="news-title">${titleHtml}</div>
+      <div class="news-sentiment">
+        <div class="sent-bar"><div class="sent-fill" style="${barStyle}"></div></div>
+        <span class="sent-score" style="color:${sc}">${scoreLabel}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function updateNews(d) {
+  _newsAll = d.news || [];
+  const sent = d.sentiment || {};
+  _renderNewsFeed();
+  setEl('newsCount', String(_newsAll.length));
+  const avgSent = sent.score || 0;
+  const sc = document.getElementById('newsSentAvg');
+  if (sc) {
+    sc.textContent = (avgSent >= 0 ? '+' : '') + avgSent.toFixed(2);
+    sc.style.color = avgSent > 0.1 ? 'var(--green)' : avgSent < -0.1 ? 'var(--red)' : 'var(--text3)';
+  }
+  // Update FinBERT quality badge
+  const qEl = document.getElementById('newsSentQuality');
+  if (qEl) {
+    const q = sent.quality || (sent.count > 0 ? 'GOOD' : 'NO DATA');
+    qEl.textContent = q;
+    qEl.style.color = q === 'GOOD' ? 'var(--green)' : q === 'LOW' ? 'var(--amber)' : 'var(--text3)';
+  }
+}
+
+// News tab click handlers
+document.querySelectorAll('.news-tab').forEach(tab => {
+  tab.addEventListener('click', function() {
+    document.querySelectorAll('.news-tab').forEach(t => t.classList.remove('active'));
+    this.classList.add('active');
+    _newsFilter = this.dataset.filter;
+    _renderNewsFeed();
+  });
+});
+
+// ── FII / OPTIONS ──
+function updateFII(d) {
+  const fii = d.fii || {};
+  const opts = d.options || {};
+  const net = fii.net_today || 0;
+  const c = net >= 0 ? 'var(--green)' : 'var(--red)';
+  const barW = Math.min(Math.abs(net)/3000*100, 100);
+  const fb = document.getElementById('fiiBar');
+  if (fb) {
+    fb.style.width = `${barW}%`;
+    fb.style.background = net >= 0 ? 'linear-gradient(90deg,var(--green),#69f0ae)' : 'linear-gradient(90deg,var(--red),#ff6b7a)';
+    fb.style.color = 'var(--bg)';
+    fb.textContent = `₹${Math.abs(net).toFixed(0)} Cr ${net >= 0 ? 'BUYING' : 'SELLING'}`;
+  }
+  const fn = document.getElementById('fiiNet');
+  if (fn) { fn.textContent = `${net >= 0 ? '+' : ''}₹${net.toFixed(0)} Cr`; fn.style.color = c; }
+  const dn = document.getElementById('diiNet');
+  const dii = fii.dii_today || 0;
+  if (dn) { dn.textContent = `${dii >= 0 ? '+' : ''}₹${dii.toFixed(0)} Cr`; dn.style.color = dii >= 0 ? 'var(--green)' : 'var(--red)'; }
+  // 5D FII net
+  const f5 = document.getElementById('fii5d');
+  const f5v = fii.fii_5d || 0;
+  if (f5) { f5.textContent = `${f5v >= 0 ? '+' : ''}₹${Math.round(f5v)} Cr`; f5.style.color = fii.trend === 'BUYING' ? 'var(--green)' : fii.trend === 'SELLING' ? 'var(--red)' : 'var(--amber)'; }
+  // 5D DII net
+  const d5 = document.getElementById('dii5d');
+  const d5v = fii.dii_5d || 0;
+  if (d5) { d5.textContent = `${d5v >= 0 ? '+' : ''}₹${Math.round(d5v)} Cr`; d5.style.color = fii.dii_trend === 'BUYING' ? 'var(--green)' : fii.dii_trend === 'SELLING' ? 'var(--red)' : '#64b5f6'; }
+  // Confluence badge in card header
+  const cfBadge = document.getElementById('fiiConfluenceBadge');
+  if (cfBadge) {
+    const cf = fii.confluence || '—';
+    cfBadge.textContent = cf;
+    cfBadge.className = `badge ${cf === 'BULLISH' ? 'badge-green' : cf === 'BEARISH' ? 'badge-red' : 'badge-amber'}`;
+  }
+  // 5D sparkline — FII (green/red) + DII (blue/amber) bars per day
+  const hist = (fii.history || []).slice().reverse();
+  const spark = document.getElementById('fiiHistory');
+  if (spark && hist.length) {
+    const maxAbs = Math.max(1, ...hist.flatMap(r => [Math.abs(r.fii_net || 0), Math.abs(r.dii_net || 0)]));
+    spark.innerHTML = hist.map(r => {
+      const fn2 = r.fii_net || 0, dn2 = r.dii_net || 0;
+      const fH  = Math.max(2, Math.abs(fn2) / maxAbs * 40);
+      const dH  = Math.max(2, Math.abs(dn2) / maxAbs * 40);
+      const fc  = fn2 >= 0 ? 'var(--green)' : 'var(--red)';
+      const dc  = dn2 >= 0 ? '#64b5f6' : 'var(--amber)';
+      const dt  = (r.date || '').slice(5).replace('-', '/');
+      const fLabel = `${fn2 >= 0 ? '+' : ''}${(Math.round(fn2 / 100) / 10).toFixed(1)}K`;
+      const dLabel = `${dn2 >= 0 ? '+' : ''}${(Math.round(dn2 / 100) / 10).toFixed(1)}K`;
+      return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;overflow:hidden">
+        <div style="font-size:6.5px;color:${fc};font-family:'Space Mono',monospace;white-space:nowrap">${fLabel}</div>
+        <div style="display:flex;gap:2px;align-items:flex-end;height:40px">
+          <div style="width:9px;height:${fH}px;background:${fc};opacity:0.85"></div>
+          <div style="width:9px;height:${dH}px;background:${dc};opacity:0.85"></div>
+        </div>
+        <div style="font-size:6.5px;color:${dc};font-family:'Space Mono',monospace;white-space:nowrap">${dLabel}</div>
+        <div style="font-size:6.5px;color:var(--text3);white-space:nowrap">${dt}</div>
+      </div>`;
+    }).join('');
+  }
+  const pcr = opts.pcr || 0;
+  const op = document.getElementById('optPcr');
+  if (op) { op.textContent = f2(pcr); op.style.color = pcr > 1.3 ? 'var(--green)' : pcr < 0.7 ? 'var(--red)' : 'var(--amber)'; }
+  const ops = document.getElementById('optPcrSignal');
+  if (ops) { ops.textContent = opts.pcr_signal || '—'; ops.style.color = opts.pcr_signal === 'BULLISH' ? 'var(--green)' : opts.pcr_signal === 'BEARISH' ? 'var(--red)' : 'var(--amber)'; }
+  setEl('optCallOI',  opts.call_oi  ? `${f2(opts.call_oi)}M`  : '—');
+  setEl('optPutOI',   opts.put_oi   ? `${f2(opts.put_oi)}M`   : '—');
+  setEl('optMaxPain', opts.max_pain ? `₹${Math.round(opts.max_pain)}` : '—');
+  setEl('optImplMove',opts.implied_move ? `±${f2(opts.implied_move)}%` : '—');
+}
+
+// ── INTERMARKET ──
+function updateIntermarket(d) {
+  const g = d.global || {};
+  const setIM = (id, val, unit='') => {
+    const el = document.getElementById(id); if (!el) return;
+    const v = parseFloat(val||0);
+    el.textContent = (unit ? unit : '') + fx(val, 2);
+    el.style.color = v >= 0 ? 'var(--green)' : 'var(--red)';
+  };
+  if (g.banknifty) setIM('imBankNifty', g.banknifty.change_pct, '');
+  if (g.sp500_live) setIM('imSP500', g.sp500_live.change_pct, '');
+  setEl('imUS10Y', g.us10y ? `${f2(g.us10y)}%` : '—');
+  if (g.usdinr_live) { const el = document.getElementById('imUSDINR'); if (el) { el.textContent = `₹${f2(g.usdinr_live.price)}`; el.style.color = 'var(--amber)'; } }
+  if (g.crude_live) setIM('imCrude', g.crude_live.change_pct, '');
+  if (g.indiavix)   { const el = document.getElementById('imVIX'); if(el) { const v=g.indiavix.price||0; el.textContent=f2(v); el.style.color=v<15?'var(--green)':v>25?'var(--red)':'var(--amber)'; } }
+  setEl('imJPM', g.jpmorgan_5d ? `${g.jpmorgan_5d >= 0 ? '+' : ''}${f2(g.jpmorgan_5d)}%` : '—');
+  if (g.dxy_level) {
+    const el = document.getElementById('imDXY');
+    const dxy5d = parseFloat(g.dxy_5d || 0);
+    if (el) { el.textContent = f2(g.dxy_level); el.style.color = dxy5d <= 0 ? 'var(--green)' : 'var(--red)'; }
+    const tEl = document.getElementById('imDXYTrend');
+    if (tEl) {
+      // Strong dollar (DXY rising) is bearish for Indian equities
+      tEl.textContent = dxy5d > 0.5 ? '▲ BEARISH INR' : dxy5d < -0.5 ? '▼ BULLISH INR' : '→ STABLE';
+      tEl.style.color = dxy5d > 0.5 ? 'var(--red)' : dxy5d < -0.5 ? 'var(--green)' : 'var(--text3)';
+    }
+  }
+  const vd = document.getElementById('imVerdict');
+  if (vd) {
+    const verdict = g.verdict || 'NEUTRAL';
+    vd.textContent = verdict;
+    vd.style.color = verdict === 'BULLISH' ? 'var(--green)' : verdict === 'BEARISH' ? 'var(--red)' : 'var(--amber)';
+  }
+}
+
+// ── MACRO ──
+function updateMacro(d) {
+  const m = d.macro || {};
+  const g = d.global || {};
+
+  // RBI Rate
+  const rbi = m.rbi_rate;
+  setEl('macroRBI', rbi != null ? `${f2(rbi)}%` : '—');
+  const rbiB = document.getElementById('macroRBIBadge');
+  if (rbiB && rbi != null) {
+    if (rbi <= 4.0)      { rbiB.textContent = 'ACCOMMODATIVE'; rbiB.className = 'badge badge-green'; }
+    else if (rbi <= 5.5) { rbiB.textContent = 'HOLD'; rbiB.className = 'badge badge-amber'; }
+    else                 { rbiB.textContent = 'RESTRICTIVE'; rbiB.className = 'badge badge-red'; }
+  } else if (rbiB) { rbiB.textContent = '—'; rbiB.className = 'badge badge-green'; }
+
+  // Inflation (CPI)
+  const cpi = m.cpi;
+  setEl('macroCPI', cpi != null ? `${f2(cpi)}%` : '—');
+  const cpiB = document.getElementById('macroCPIBadge');
+  if (cpiB && cpi != null) {
+    if (cpi < 4.0)      { cpiB.textContent = 'LOW ✓'; cpiB.className = 'badge badge-green'; }
+    else if (cpi < 6.0) { cpiB.textContent = 'WATCH'; cpiB.className = 'badge badge-amber'; }
+    else                { cpiB.textContent = 'HIGH ⚠'; cpiB.className = 'badge badge-red'; }
+  } else if (cpiB) { cpiB.textContent = '—'; cpiB.className = 'badge badge-amber'; }
+
+  // Credit Growth
+  const cg = m.credit_growth;
+  setEl('macroCredit', cg != null ? `${f2(cg)}%` : '—');
+  const cgB = document.getElementById('macroCreditBadge');
+  if (cgB && cg != null) {
+    if (cg >= 15)       { cgB.textContent = 'BULLISH'; cgB.className = 'badge badge-green'; }
+    else if (cg >= 10)  { cgB.textContent = 'MODERATE'; cgB.className = 'badge badge-amber'; }
+    else                { cgB.textContent = 'WEAK'; cgB.className = 'badge badge-red'; }
+  } else if (cgB) { cgB.textContent = '—'; cgB.className = 'badge badge-green'; }
+
+  // GDP — sourced from global_snapshots if available, else from macro
+  const gdp = m.gdp;
+  const gdpEl = document.getElementById('macroGDP');
+  const gdpB  = document.getElementById('macroGDPBadge');
+  if (gdpEl) gdpEl.textContent = gdp != null ? `${f2(gdp)}%` : '—';
+  if (gdpB && gdp != null) {
+    if (gdp >= 7)       { gdpB.textContent = 'STRONG'; gdpB.className = 'badge badge-green'; }
+    else if (gdp >= 5)  { gdpB.textContent = 'MODERATE'; gdpB.className = 'badge badge-amber'; }
+    else                { gdpB.textContent = 'WEAK'; gdpB.className = 'badge badge-red'; }
+  } else if (gdpB) { gdpB.textContent = '—'; gdpB.className = 'badge badge-green'; }
+
+  // India VIX
+  const vix = g.vix || (g.indiavix ? g.indiavix.price : 0) || 0;
+  setEl('macroVIX', vix ? f2(vix) : '—');
+  const vb = document.getElementById('macroVIXBadge');
+  if (vb) {
+    if (!vix)           { vb.textContent = '—'; vb.className = 'badge badge-green'; }
+    else if (vix < 15)  { vb.textContent = 'LOW FEAR'; vb.className = 'badge badge-green'; }
+    else if (vix > 25)  { vb.textContent = 'HIGH FEAR'; vb.className = 'badge badge-red'; }
+    else                { vb.textContent = 'ELEVATED'; vb.className = 'badge badge-amber'; }
+  }
+
+  // Days to Earnings
+  const dte = m.days_to_earnings;
+  const dteEl = document.getElementById('macroEarnDays');
+  const dteB  = document.getElementById('macroEarnBadge');
+  if (dteEl) {
+    if (dte == null)    { dteEl.textContent = '—'; dteEl.style.color = 'var(--text3)'; }
+    else                { dteEl.textContent = `${dte}d`; dteEl.style.color = dte <= 7 ? 'var(--red)' : dte <= 21 ? 'var(--amber)' : 'var(--text)'; }
+  }
+  if (dteB) {
+    if (dte == null)    { dteB.textContent = '—'; dteB.className = 'badge badge-amber'; }
+    else if (dte <= 3)  { dteB.textContent = 'IMMINENT'; dteB.className = 'badge badge-red'; }
+    else if (dte <= 7)  { dteB.textContent = 'THIS WEEK'; dteB.className = 'badge badge-red'; }
+    else if (dte <= 21) { dteB.textContent = 'APPROACHING'; dteB.className = 'badge badge-amber'; }
+    else                { dteB.textContent = 'CLEAR'; dteB.className = 'badge badge-green'; }
+  }
+
+  // Macro Verdict — derived from actual indicators, not just signal direction
+  const mv = document.getElementById('macroVerdict');
+  if (mv) {
+    let score = 0;
+    if (rbi != null) score += rbi <= 5.5 ? 1 : -1;
+    if (cpi != null) score += cpi < 5 ? 1 : cpi > 6 ? -1 : 0;
+    if (cg  != null) score += cg >= 15 ? 1 : cg < 10 ? -1 : 0;
+    if (vix)         score += vix < 15 ? 1 : vix > 25 ? -2 : 0;
+    const verdict = score >= 2 ? 'MACRO CONDUCIVE · LONG BIAS' :
+                    score <= -2 ? 'MACRO CAUTIOUS · RISK OFF' :
+                    'MIXED SIGNALS · WATCH';
+    mv.textContent = verdict;
+    mv.style.color = score >= 2 ? 'var(--green)' : score <= -2 ? 'var(--red)' : 'var(--amber)';
+    mv.style.background = score >= 2 ? 'var(--green-dim)' : score <= -2 ? 'var(--red-dim)' : 'var(--amber-dim)';
+    mv.style.borderColor = score >= 2 ? 'rgba(0,230,118,0.2)' : score <= -2 ? 'rgba(255,61,87,0.2)' : 'rgba(255,171,0,0.2)';
+  }
+}
+
+// ── UNIVERSE RANKING ──
+const _SIZE_MULT_MAP = {1:1.00, 2:0.85, 3:0.70, 4:0.55, 5:0.40};
+
+function updateUniverse(d) {
+  const ul = document.getElementById('universeList');
+  if (!ul) return;
+  const universe = d.universe || [];
+  if (!universe.length) return;
+
+  const maxScore = Math.max(...universe.map(u => Math.abs(u.score||0)), 0.01);
+  const selName  = selectedTicker.replace('.NS','');
+
+  ul.innerHTML = universe.map((u, i) => {
+    const score  = u.score  || 0;
+    const rank   = u.rank   || (i + 1);
+    const isTop  = i === 0;
+    const isSel  = u.name === selName;
+    const disq   = score < -5;
+    const sizeMult = disq ? 0 : (_SIZE_MULT_MAP[rank] || 0.40);
+    const barW   = disq ? 0 : Math.min(Math.abs(score) / maxScore * 100, 100);
+    const scoreColor = score >= 1 ? 'var(--green)' : score <= -1 ? 'var(--red)' : 'var(--text3)';
+    const barColor   = score >= 0 ? 'var(--green)' : 'var(--red)';
+    const sizeColor  = sizeMult >= 0.85 ? 'var(--green)' : sizeMult >= 0.60 ? 'var(--amber)' : 'var(--red)';
+
+    let rowExtra = '';
+    if (isTop)  rowExtra = 'background:var(--green-dim);border-left:2px solid var(--green);padding-left:12px;margin:0 -14px;padding-right:14px;';
+    if (isSel && !isTop) rowExtra = 'background:rgba(41,121,255,0.06);border-left:2px solid var(--blue);padding-left:12px;margin:0 -14px;padding-right:14px;';
+    if (disq)   rowExtra += 'opacity:0.4;';
+
+    return `<div class="universe-row" style="${rowExtra}">
+      <div class="uni-rank" style="color:${isTop?'var(--green)':isSel?'var(--blue)':'var(--text3)'}">${rank}</div>
+      <div class="uni-name" style="font-weight:${isTop||isSel?'700':'400'};color:${isTop?'var(--green)':isSel?'var(--blue)':'var(--text)'}">${u.name}${isSel?' ◀':''}</div>
+      <div class="uni-score" style="color:${scoreColor}">${score>=0?'+':''}${typeof score==='number'?score.toFixed(1):'—'}</div>
+      <div class="uni-bar"><div class="uni-fill" style="width:${barW}%;background:${barColor}"></div></div>
+      <div class="uni-size" style="color:${disq?'var(--red)':sizeColor}">${disq?'SKIP':`${Math.round(sizeMult*100)}%`}</div>
+    </div>`;
+  }).join('');
+
+  // Update top badge
+  const topBank = universe[0];
+  const badge = document.getElementById('universeTopBadge');
+  if (badge && topBank) badge.textContent = `#1 ${topBank.name}`;
+}
+
+// ── PORTFOLIO & PERFORMANCE ──
+function updatePerformance(d) {
+  const p = d.performance || {};
+  const wins = p.wins || 0; const losses = p.losses || 0; const total = p.total_trades || 0;
+
+  // ── Portfolio heatmap ──────────────────────────────────────────
+  setEl('portfWins',   String(wins));
+  setEl('portfLosses', String(losses));
+  setEl('portfOpenTrades', String(p.open_trades_count ?? (d.trade && d.trade.active ? 1 : 0)));
+  setEl('portfConsecLosses', String(p.consec_losses || 0));
+  setEl('portfConsecStatus', p.consec_losses ? `${p.consec_losses} ⚠` : '0 ✓');
+
+  // Exposure
+  const expEl = document.getElementById('portfExposure');
+  const exp   = p.open_exposure || 0;
+  if (expEl) {
+    expEl.textContent = exp > 0 ? `₹${(exp / 1000).toFixed(1)}K` : '₹0';
+    expEl.style.color = exp > 0 ? 'var(--amber)' : 'var(--text3)';
+  }
+
+  // Capital mode
+  const cmEl = document.getElementById('portfCapitalMode');
+  if (cmEl) {
+    cmEl.textContent   = p.capital_mode || '—';
+    cmEl.style.color   = p.capital_mode === 'FULL' ? 'var(--green)' : p.capital_mode === 'GROWING' ? 'var(--cyan)' : 'var(--amber)';
+  }
+  const csEl = document.getElementById('portfCapitalSub');
+  if (csEl) {
+    const desc = {SMALL:'<₹50K · Conservative', GROWING:'₹50K–₹2L · Active', FULL:'>₹2L · Aggressive'};
+    csEl.textContent = desc[p.capital_mode] || '—';
+  }
+
+  // Risk badge
+  const rbEl = document.getElementById('portfRiskBadge');
+  if (rbEl) {
+    const badge = p.risk_badge || 'SAFE';
+    rbEl.textContent = badge;
+    rbEl.className   = `badge ${badge === 'DANGER' ? 'badge-red' : badge === 'WARNING' ? 'badge-amber' : 'badge-green'}`;
+  }
+
+  // P&L fields (shared between heatmap + performance card)
+  const tpnl = p.total_pnl  || 0;
+  const mpnl = p.monthly_pnl || 0;
+  [document.getElementById('portfTotalPnl'), document.getElementById('perfTotalPnl')].forEach(el => {
+    if (el) { el.textContent = `${tpnl>=0?'+':''}₹${Math.round(tpnl)}`; el.style.color = tpnl>=0?'var(--green)':'var(--red)'; }
+  });
+  [document.getElementById('portfMonthPnl'), document.getElementById('perfMonthPnl')].forEach(el => {
+    if (el) { el.textContent = `${mpnl>=0?'+':''}₹${Math.round(mpnl)}`; el.style.color = mpnl>=0?'var(--green)':'var(--red)'; }
+  });
+
+  // ── System performance card ────────────────────────────────────
+  const wrEl = document.getElementById('perfWinRate');
+  if (wrEl) {
+    wrEl.textContent = total > 0 ? pct(p.win_rate) : '—';
+    wrEl.style.color = p.win_rate >= 52 ? 'var(--green)' : p.win_rate >= 40 ? 'var(--amber)' : 'var(--red)';
+  }
+  const pfEl = document.getElementById('perfPF');
+  if (pfEl) {
+    pfEl.textContent = p.profit_factor > 0 ? f2(p.profit_factor) : '—';
+    pfEl.style.color = p.profit_factor >= 1.5 ? 'var(--green)' : p.profit_factor >= 1 ? 'var(--amber)' : 'var(--red)';
+  }
+  setEl('perfTotal', String(total));
+  setHtml('perfWinsLosses', `<span style="color:var(--green)">${wins}</span> / <span style="color:var(--red)">${losses}</span>`);
+  const aw = p.avg_win_pct || 0; const al = p.avg_loss_pct || 0;
+  setEl('perfAvgWin',  aw ? `+${f2(aw)}%` : '—');
+  setEl('perfAvgLoss', al ? `${f2(al)}%`  : '—');
+
+  // Sharpe ratio
+  const shEl = document.getElementById('perfSharpe');
+  const sh   = p.sharpe || 0;
+  if (shEl) {
+    shEl.textContent = sh ? f2(sh) : '—';
+    shEl.style.color = sh >= 1 ? 'var(--green)' : sh >= 0 ? 'var(--amber)' : 'var(--red)';
+  }
+}
+
+// ── LLM ──
+function updateLLM(d) {
+  const l = d.llm || {};
+  const es = l.earnings_score || 0; const as = l.announcement_score || 0; const cm = l.combined || 0;
+  const esEl = document.getElementById('llmEarnScore');
+  if (esEl) { esEl.textContent = `${es>=0?'+':''}${f2(es)}`; esEl.style.color = es>=0?'var(--green)':'var(--red)'; }
+  const asEl = document.getElementById('llmAnnScore');
+  if (asEl) { asEl.textContent = `${as>=0?'+':''}${f2(as)}`; asEl.style.color = as>=0?'var(--blue)':'var(--red)'; }
+  const cmEl = document.getElementById('llmCombined');
+  if (cmEl) { cmEl.textContent = `${cm>=0?'+':''}${f2(cm)}`; cmEl.style.color = cm>=0?'var(--green)':'var(--red)'; }
+  const txt = l.earnings_text || l.announcement_reason || '';
+  if (txt) setEl('llmText', txt.slice(0, 250) + (txt.length > 250 ? '...' : ''));
+}
+
+// ── EXIT ENGINE ──
+function updateExit(d) {
+  const ex = d.exit_engine || {};
+  const tr = d.trade || {};
+  const dir = tr.direction || '';
+  const ed = document.getElementById('exitDirection');
+  if (ed) {
+    ed.textContent = ex.active ? (dir || 'ACTIVE') : 'NO TRADE';
+    ed.style.color = ex.active ? (dir === 'LONG' ? 'var(--green)' : dir === 'SHORT' ? 'var(--red)' : 'var(--text)') : 'var(--text3)';
+  }
+  const days = ex.days_held || 0;
+  const tt   = tr.trade_type || 'swing';
+  setEl('exitDaysHeld', ex.active ? `${tt.toUpperCase()} · DAY ${days}` : '—');
+  const pnl = ex.unrealized_pnl || 0;
+  const ep = document.getElementById('exitPnl');
+  if (ep) { ep.textContent = ex.active ? `${pnl>=0?'+':''}${f2(pnl)}%` : '—'; ep.style.color = ex.active ? (pnl>=0?'var(--green)':'var(--red)') : 'var(--text3)'; }
+  const ts = ex.trail_stop || 0;
+  setEl('exitTrailStop', ex.active && ts > 0 ? `Trail: ₹${f2(ts)}` : 'Trail: —');
+}
+
+// ── MODEL CARDS ──
+function updateModelCards(d) {
+  const models = d.models || {};
+
+  function applyModel(prefix, m, accentColor) {
+    if (!m || !m.signal) return;
+    const arrow = m.signal === 'LONG' ? '▲' : m.signal === 'SHORT' ? '▼' : '—';
+    const sigColor = m.signal === 'LONG' ? 'var(--green)' : m.signal === 'SHORT' ? 'var(--red)' : 'var(--text3)';
+    const confPct  = Math.round((m.confidence || 0) * 100);
+
+    const sigEl = document.getElementById(prefix + 'Signal');
+    if (sigEl) { sigEl.textContent = `${arrow} ${m.signal}`; sigEl.style.color = sigColor; }
+
+    const confEl = document.getElementById(prefix + 'Conf');
+    if (confEl) { confEl.textContent = `${confPct}%`; confEl.style.color = accentColor; }
+
+    const fillEl = document.getElementById(prefix + 'Fill');
+    if (fillEl) fillEl.style.width = `${confPct}%`;
+
+    const pL = Math.round((m.prob_long  || 0) * 100);
+    const pF = Math.round((m.prob_flat  || 0) * 100);
+    const pS = Math.round((m.prob_short || 0) * 100);
+    setEl(prefix + 'ProbLong',  `${pL}%`);
+    setEl(prefix + 'ProbFlat',  `${pF}%`);
+    setEl(prefix + 'ProbShort', `${pS}%`);
+  }
+
+  applyModel('pos',      models.positional, 'var(--blue)');
+  applyModel('swing',    models.swing,      'var(--green)');
+  applyModel('intraday', models.intraday,   'var(--amber)');
+}
+
+// ── POSITIONAL MODEL FEATURES ──────────────────────────────────────────
+// Computes EMA20/50, weekly RSI, fund grade, NIM/NPA trend, earnings days
+// entirely from data already in the API response — no extra network calls.
+
+function _ema(prices, period) {
+  if (!prices || prices.length < period) return null;
+  const k = 2 / (period + 1);
+  // Seed with SMA of first `period` bars
+  let ema = prices.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < prices.length; i++) ema = prices[i] * k + ema * (1 - k);
+  return ema;
+}
+
+function _rsi(prices, period) {
+  if (!prices || prices.length < period + 1) return null;
+  const changes = [];
+  for (let i = 1; i < prices.length; i++) changes.push(prices[i] - prices[i - 1]);
+  // Use the last `period` changes
+  const slice  = changes.slice(-period);
+  const avgGain = slice.reduce((s, c) => s + Math.max(c, 0), 0) / period;
+  const avgLoss = slice.reduce((s, c) => s + Math.max(-c, 0), 0) / period;
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
+function updatePositionalFeatures(d) {
+  const fund  = d.fundamentals || {};
+  const macro = d.macro        || {};
+
+  // ── EMA20 vs EMA50 (from daily candles) ──
+  const closes1d = (d.chart_1d || []).map(c => c.c);
+  const ema20 = _ema(closes1d, 20);
+  const ema50 = _ema(closes1d, 50);
+  const emaEl = document.getElementById('posEmaSignal');
+  if (emaEl && ema20 !== null && ema50 !== null) {
+    const gap   = ((ema20 - ema50) / ema50 * 100).toFixed(2);
+    const bull  = ema20 > ema50;
+    emaEl.textContent = bull ? `▲ BULL  ${gap}%` : `▼ BEAR  ${gap}%`;
+    emaEl.style.color = bull ? 'var(--green)' : 'var(--red)';
+  }
+
+  // ── Weekly RSI 14 (from weekly candles) ──
+  const closes1w = (d.chart_1w || []).map(c => c.c);
+  const rsiVal   = _rsi(closes1w, 14);
+  const rsiEl    = document.getElementById('posWeeklyRsi');
+  if (rsiEl && rsiVal !== null) {
+    const r = rsiVal.toFixed(1);
+    const label = rsiVal > 70 ? 'OVERBOUGHT' : rsiVal < 30 ? 'OVERSOLD' : 'NEUTRAL';
+    rsiEl.textContent = `${r}  ${label}`;
+    rsiEl.style.color = rsiVal > 70 ? 'var(--red)' : rsiVal < 30 ? 'var(--green)' : 'var(--amber)';
+  }
+
+  // ── Fund grade from fundamentals ──
+  const nim = fund.nim || 0, npa = fund.npa_gross || 99, roe = fund.roe || 0, casa = fund.casa_ratio || 0;
+  const fgEl = document.getElementById('posFundGrade');
+  if (fgEl && nim) {
+    let score = 0;
+    if (nim  >= 4.0)  score += 2; else if (nim  >= 3.5) score += 1;
+    if (npa  <= 1.5)  score += 2; else if (npa  <= 2.5) score += 1;
+    if (roe  >= 18)   score += 2; else if (roe  >= 14)  score += 1;
+    if (casa >= 45)   score += 1;
+    const grade = score >= 6 ? 'EXCELLENT' : score >= 4 ? 'GOOD' : score >= 2 ? 'FAIR' : 'POOR';
+    fgEl.textContent = grade;
+    fgEl.style.color = score >= 6 ? 'var(--green)' : score >= 4 ? 'var(--amber)' : 'var(--red)';
+  }
+
+  // ── NIM trend ──
+  const nimEl = document.getElementById('posNimTrend');
+  if (nimEl && nim) {
+    const label = nim >= 4.2 ? 'EXPANDING' : nim >= 3.8 ? 'STABLE' : 'COMPRESSING';
+    nimEl.textContent = `${nim.toFixed(1)}%  ${label}`;
+    nimEl.style.color = nim >= 4.2 ? 'var(--green)' : nim >= 3.8 ? 'var(--amber)' : 'var(--red)';
+  }
+
+  // ── NPA trend ──
+  const npaEl = document.getElementById('posNpaTrend');
+  if (npaEl && fund.npa_gross !== undefined) {
+    const label = npa <= 1.5 ? 'EXCELLENT' : npa <= 2.5 ? 'IMPROVING' : npa <= 4.0 ? 'WATCH' : 'STRESS';
+    npaEl.textContent = `${npa.toFixed(2)}%  ${label}`;
+    npaEl.style.color = npa <= 1.5 ? 'var(--green)' : npa <= 2.5 ? 'var(--amber)' : 'var(--red)';
+  }
+
+  // ── Earnings countdown ──
+  const earnEl = document.getElementById('posEarnings');
+  if (earnEl) {
+    const dte = macro.days_to_earnings;
+    if (dte !== null && dte !== undefined) {
+      const label = dte <= 7 ? 'THIS WEEK' : dte <= 21 ? 'SOON' : dte <= 45 ? 'APPROACHING' : 'FAR';
+      earnEl.textContent = `${dte}d  ${label}`;
+      earnEl.style.color = dte <= 21 ? 'var(--amber)' : 'var(--text3)';
+    } else {
+      earnEl.textContent = '—';
+      earnEl.style.color = 'var(--text3)';
+    }
+  }
+}
+
+// ── SWING MODEL FEATURES ────────────────────────────────────────────────
+// RSI14, MACD, Volume ratio, Sentiment, vs BankNifty 5D, Bollinger Band %
+function updateSwingFeatures(d) {
+  const closes = (d.chart_1d || []).map(c => c.c);
+  const sb     = d.selected_bank || {};
+  const glb    = d.global        || {};
+  const news   = d.news          || [];
+
+  // ── RSI 14 (daily) ──
+  const rsiEl = document.getElementById('swingRsi14');
+  if (rsiEl) {
+    const r = _rsi(closes, 14);
+    if (r !== null) {
+      const lbl = r > 70 ? 'OVERBOUGHT' : r < 30 ? 'OVERSOLD' : r > 55 ? 'STRONG' : r < 45 ? 'WEAK' : 'NEUTRAL';
+      rsiEl.textContent = `${r.toFixed(1)}  ${lbl}`;
+      rsiEl.style.color = r > 70 ? 'var(--red)' : r < 30 ? 'var(--green)' : r > 55 ? 'var(--green)' : r < 45 ? 'var(--red)' : 'var(--amber)';
+    }
+  }
+
+  // ── MACD (EMA12 − EMA26; positive = bullish) ──
+  const macdEl = document.getElementById('swingMacd');
+  if (macdEl && closes.length >= 26) {
+    const macdLine = _ema(closes, 12) - _ema(closes, 26);
+    // Signal = EMA9 of the last N MACD values (approximate with a single value comparison)
+    const macdPrev = _ema(closes.slice(0, -1), 12) - _ema(closes.slice(0, -1), 26);
+    const rising   = macdLine > macdPrev;
+    const bull     = macdLine > 0;
+    macdEl.textContent = `${bull ? '▲' : '▼'} ${macdLine >= 0 ? '+' : ''}${macdLine.toFixed(2)}  ${rising ? 'RISING' : 'FALLING'}`;
+    macdEl.style.color = bull && rising ? 'var(--green)' : !bull && !rising ? 'var(--red)' : 'var(--amber)';
+  }
+
+  // ── Volume ratio ──
+  const volEl = document.getElementById('swingVolRatio');
+  if (volEl) {
+    const vr = parseFloat(sb.vol_ratio || 0);
+    const lbl = vr >= 2.0 ? 'SURGE' : vr >= 1.3 ? 'HIGH' : vr >= 0.7 ? 'NORMAL' : 'LOW';
+    volEl.textContent = `${vr.toFixed(2)}x  ${lbl}`;
+    volEl.style.color = vr >= 1.5 ? 'var(--green)' : vr < 0.6 ? 'var(--red)' : 'var(--amber)';
+  }
+
+  // ── News sentiment (avg score of recent headlines) ──
+  const sentEl = document.getElementById('swingSentiment');
+  if (sentEl && news.length > 0) {
+    const scores = news.map(n => parseFloat(n.score || 0));
+    const avg    = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const lbl    = avg > 0.2 ? 'BULLISH' : avg < -0.2 ? 'BEARISH' : 'NEUTRAL';
+    sentEl.textContent = `${avg >= 0 ? '+' : ''}${avg.toFixed(3)}  ${lbl}`;
+    sentEl.style.color = avg > 0.2 ? 'var(--green)' : avg < -0.2 ? 'var(--red)' : 'var(--amber)';
+  }
+
+  // ── Bank vs BankNifty 5D outperformance ──
+  const niftyEl = document.getElementById('swingVsNifty');
+  if (niftyEl && closes.length >= 6) {
+    const bank5d    = (closes[closes.length - 1] - closes[closes.length - 6]) / closes[closes.length - 6] * 100;
+    const bnifty5d  = parseFloat(glb.banknifty_5d || 0);
+    const outperf   = bank5d - bnifty5d;
+    const lbl       = outperf > 0.5 ? 'OUTPERFORM' : outperf < -0.5 ? 'UNDERPERFORM' : 'IN-LINE';
+    niftyEl.textContent = `${outperf >= 0 ? '+' : ''}${outperf.toFixed(2)}%  ${lbl}`;
+    niftyEl.style.color = outperf > 0.5 ? 'var(--green)' : outperf < -0.5 ? 'var(--red)' : 'var(--amber)';
+  }
+
+  // ── Bollinger Band % position (20-period, 2σ) ──
+  const bbEl = document.getElementById('swingBBPos');
+  if (bbEl && closes.length >= 20) {
+    const window20 = closes.slice(-20);
+    const sma20    = window20.reduce((a, b) => a + b, 0) / 20;
+    const std20    = Math.sqrt(window20.reduce((s, v) => s + (v - sma20) ** 2, 0) / 20);
+    const upper    = sma20 + 2 * std20;
+    const lower    = sma20 - 2 * std20;
+    const price    = closes[closes.length - 1];
+    const bbPct    = std20 > 0 ? Math.round((price - lower) / (upper - lower) * 100) : 50;
+    const lbl      = bbPct >= 80 ? 'NEAR TOP' : bbPct <= 20 ? 'NEAR BOTTOM' : bbPct >= 60 ? 'UPPER HALF' : bbPct <= 40 ? 'LOWER HALF' : 'MID';
+    bbEl.textContent = `${bbPct}%  ${lbl}`;
+    bbEl.style.color = bbPct >= 80 ? 'var(--red)' : bbPct <= 20 ? 'var(--green)' : 'var(--amber)';
+  }
+}
+
+// ── INTRADAY MODEL FEATURES ──────────────────────────────────────────────
+// VWAP position, RSI9, Order flow delta, Morning direction, Absorption
+function updateIntradayFeatures(d) {
+  const of     = d.order_flow || {};
+  const closes = (d.chart_1d || []).map(c => c.c);
+
+  // ── VWAP position ──
+  const vwapEl = document.getElementById('intradayVwap');
+  if (vwapEl) {
+    const v    = of.vwap_signal || '—';
+    const bull = v === 'ABOVE_VWAP';
+    const bear = v === 'BELOW_VWAP';
+    vwapEl.textContent = bull ? '▲ ABOVE VWAP' : bear ? '▼ BELOW VWAP' : v;
+    vwapEl.style.color = bull ? 'var(--green)' : bear ? 'var(--red)' : 'var(--amber)';
+  }
+
+  // ── RSI 9 (daily as intraday proxy) ──
+  const rsiEl = document.getElementById('intradayRsi9');
+  if (rsiEl) {
+    const r = _rsi(closes, 9);
+    if (r !== null) {
+      const lbl = r > 70 ? 'OVERBOUGHT' : r < 30 ? 'OVERSOLD' : r > 55 ? 'STRONG' : r < 45 ? 'WEAK' : 'NEUTRAL';
+      rsiEl.textContent = `${r.toFixed(1)}  ${lbl}`;
+      rsiEl.style.color = r > 70 ? 'var(--red)' : r < 30 ? 'var(--green)' : r > 55 ? 'var(--green)' : r < 45 ? 'var(--red)' : 'var(--amber)';
+    }
+  }
+
+  // ── Order flow delta trend ──
+  const deltaEl = document.getElementById('intradayDelta');
+  if (deltaEl) {
+    const trend = of.delta_trend || '';
+    const score = parseFloat(of.order_flow_score || 0);
+    const sig   = of.order_flow_signal || '';
+    const bull  = trend === 'RISING' || score > 0.3;
+    const bear  = trend === 'FALLING' || score < -0.3;
+    deltaEl.textContent = `${bull ? '▲' : bear ? '▼' : '→'} ${trend || '—'}  ${score >= 0 ? '+' : ''}${score.toFixed(2)}`;
+    deltaEl.style.color = bull ? 'var(--green)' : bear ? 'var(--red)' : 'var(--amber)';
+  }
+
+  // ── Morning direction (last daily candle: bull or bear) ──
+  const morEl = document.getElementById('intradayMorningDir');
+  if (morEl && d.chart_1d && d.chart_1d.length > 0) {
+    const last  = d.chart_1d[d.chart_1d.length - 1];
+    const bull  = last.c >= last.o;
+    const chgPct = last.o > 0 ? ((last.c - last.o) / last.o * 100).toFixed(2) : '0.00';
+    morEl.textContent = `${bull ? '▲ BULL' : '▼ BEAR'}  ${bull ? '+' : ''}${chgPct}%`;
+    morEl.style.color = bull ? 'var(--green)' : 'var(--red)';
+  }
+
+  // ── Institutional absorption ──
+  const absEl = document.getElementById('intradayAbsorption');
+  if (absEl) {
+    const detected = of.absorption_detected;
+    const bias     = of.inst_bias     || 'NEUTRAL';
+    const conv     = of.inst_conviction || 'LOW';
+    if (detected) {
+      absEl.textContent = `✓ DETECTED  ${bias}`;
+      absEl.style.color = bias === 'BULLISH' ? 'var(--green)' : bias === 'BEARISH' ? 'var(--red)' : 'var(--amber)';
+    } else {
+      absEl.textContent = `NONE  ${bias} / ${conv}`;
+      absEl.style.color = 'var(--text3)';
+    }
+  }
+}
+
+// ── PIPELINE (3 category-specific 6-gate panels) ──
+// SWING / POSITIONAL / INTRADAY each run their own pipeline. Gates 1–3 are
+// global (identical across panels). Gates 4–6 are per-category: pulled from
+// gate_results.per_category[cat]. A category emits a signal the moment its
+// own 6 gates clear — independent of the other two.
+function updatePipeline(d) {
+  const r   = d.regime  || {};
+  const sig = d.signal  || {};
+  const mod = d.models  || {};
+  const h   = d.selected_bank || {};
+
+  const CATS = [
+    { key: 'swing',      color: 'var(--green)' },
+    { key: 'positional', color: 'var(--blue)'  },
+    { key: 'intraday',   color: 'var(--amber)' },
+  ];
+
+  function styleStage(stageId, nameId, statusId, timeId, pass, accentColor, statusTxt, timeTxt) {
+    const stage = document.getElementById(stageId);
+    const passCol = pass === true ? accentColor : pass === false ? 'var(--red)' : 'var(--text3)';
+    const bg      = pass === true ? 'rgba(0,230,118,0.05)' : pass === false ? 'rgba(255,82,82,0.05)' : 'transparent';
+    const border  = pass === true ? accentColor : pass === false ? 'var(--red)' : 'var(--text3)';
+    if (stage) { stage.style.borderColor = border; stage.style.background = bg; }
+    const nameEl = document.getElementById(nameId);
+    if (nameEl) nameEl.style.color = passCol;
+    const statEl = document.getElementById(statusId);
+    if (statEl) {
+      statEl.textContent = statusTxt;
+      statEl.style.color = passCol;
+      statEl.className = pass === true ? 'pipe-status pass' : 'pipe-status';
+    }
+    const timeEl = document.getElementById(timeId);
+    if (timeEl) timeEl.textContent = timeTxt;
+  }
+
+  // ── Shared (global) gates 1–3 are computed once and mirrored to all panels.
+  const gr = sig.gate_results || {};
+  const g1 = gr.gate1 || {};
+  const g2 = gr.gate2 || {};
+  const g3 = gr.gate3 || {};
+  const g4 = gr.gate4 || {};
+  const perCat = gr.per_category || {};
+
+  // Global Gate 1
+  const sigRegime  = (g1.regime || sig.regime || '').toUpperCase();
+  const regimeName = (sigRegime && sigRegime !== 'FLAT' && sigRegime !== 'UNKNOWN') ? sigRegime : (r.name || '');
+  const stab       = Math.round(r.stability || 0);
+  const g1Ok       = g1.passed !== undefined ? !!g1.passed : (regimeName && !regimeName.includes('CHOPPY'));
+  const g1StatusTxt = g1Ok ? '✓ PASS' : (regimeName ? '✗ BLOCK' : '—');
+  const g1TimeTxt   = regimeName ? `${regimeName.replace(/_/g, ' ')} · ${stab}% stable` : '—';
+
+  // Global Gate 2
+  const g2Passed = g2.passed !== undefined ? g2.passed : null;
+  const g2n      = g2.n_passed || 0;
+  const g2total  = g2.n_total  || 11;
+  const g2Ok     = g2Passed === true;
+  const g2StatusTxt = g2Passed !== null ? (g2Ok ? `✓ ${g2n}/${g2total} PASS` : `✗ ${g2n}/${g2total} FAIL`) : '—';
+  const g2TimeTxt   = g2Passed !== null ? ((g2.fail_reasons||[]).slice(0,1).join(' | ') || `${g2n}/${g2total} checks`) : 'Waiting for regime';
+
+  // Global Gate 3 (rank + universe fallback)
+  const univ    = d.universe || [];
+  const selName = (selectedTicker || '').replace('.NS','');
+  const selBank = univ.find(u => u.name === selName) || univ.find(u => u.name === 'HDFCBANK');
+  const rank    = g3.ticker_rank || (selBank ? selBank.rank : 0);
+  const score   = selBank ? (selBank.score || 0) : 0;
+  const SIZE_MULT = {1:1.00, 2:0.85, 3:0.70, 4:0.55, 5:0.40};
+  const sizeMult  = rank > 0 ? (SIZE_MULT[rank] || 0.40) : 1.0;
+  const g3Passed  = g3.passed !== undefined ? g3.passed : null;
+  const g3Disq    = g3Passed !== null ? (g3.disqualified || false) : (rank > 0 && score < -5);
+  const g3Ok      = g3Passed !== null ? g3Passed : (rank > 0 && !g3Disq);
+  const g3StatusTxt = g3Disq ? '✗ FALLING KNIFE' : (rank > 0 ? `✓ RANK #${rank} · ${Math.round(sizeMult*100)}%` : '—');
+  const g3TimeTxt   = rank > 0
+    ? `${selName} · score ${score>=0?'+':''}${typeof score==='number'?score.toFixed(1):'—'} · size ${Math.round(sizeMult*100)}%`
+    : 'All 5 banks eligible';
+
+  // Per-category render
+  for (const { key, color } of CATS) {
+    const pc      = perCat[key] || {};
+    const modPred = (g4[key] || mod[key] || {});
+    const dir     = pc.direction || modPred.signal || '—';
+    const confRaw = pc.confidence != null ? pc.confidence : (modPred.confidence || 0);
+    const confPct = Math.round((confRaw || 0) * 100);
+
+    // Header
+    const dirEl = document.getElementById(`${key}Dir`);
+    if (dirEl) {
+      dirEl.textContent = dir;
+      dirEl.style.color = dir === 'LONG' ? 'var(--green)' : dir === 'SHORT' ? 'var(--red)' : 'var(--text3)';
+    }
+    const confEl = document.getElementById(`${key}Conf`);
+    if (confEl) confEl.textContent = confPct > 0 ? `${confPct}%` : '—';
+
+    // Gates 1–3: mirror global pass/fail into each panel
+    styleStage(`${key}PipeGate01`, `${key}PipeG1Name`, `${key}PipeG1Status`, `${key}PipeG1Time`,
+               g1Ok, color, g1StatusTxt, g1TimeTxt);
+    styleStage(`${key}PipeGate02`, `${key}PipeG2Name`, `${key}PipeG2Status`, `${key}PipeG2Time`,
+               g2Ok, color, g2StatusTxt, g2TimeTxt);
+    styleStage(`${key}PipeGate03`, `${key}PipeG3Name`, `${key}PipeG3Status`, `${key}PipeG3Time`,
+               g3Ok, color, g3StatusTxt, g3TimeTxt);
+
+    // Gate 4: this category's model produced a non-FLAT signal
+    const g4Cat   = g4[key] || modPred || {};
+    const g4CatOk = g4Cat.signal && g4Cat.signal !== 'FLAT';
+    const g4StatusTxt = g4Cat.signal
+      ? (g4CatOk ? `✓ ${g4Cat.signal} ${Math.round((g4Cat.confidence||0)*100)}%` : `✗ FLAT`)
+      : '—';
+    const align = g4.alignment || sig.alignment || '';
+    const g4TimeTxt = align ? `align ${align}` : (g4Cat.signal || '—');
+    styleStage(`${key}PipeGate04`, `${key}PipeG4Name`, `${key}PipeG4Status`, `${key}PipeG4Time`,
+               g4CatOk === true, color, g4StatusTxt, g4TimeTxt);
+
+    // Gates 5 + 6: from per-category result (set by signal_engine per-category loop)
+    // Every non-FLAT category gets G5 + G6 evaluated EVERY cycle now —
+    // no "awaiting" once Gate 4 has run. FLAT categories show "— model FLAT".
+    const isFlatCat = (pc.direction === 'FLAT') || (!pc.direction && !g4CatOk);
+    const g5     = pc.gate5 || {};
+    const g5Has  = pc.gate5 !== undefined && pc.gate5 !== null;
+    const g5Pass = g5Has ? !!g5.passed : null;
+    const g5Q    = g5.entry_quality || '';
+    const g5RR   = g5.reward_risk != null ? Number(g5.reward_risk).toFixed(1) : null;
+    const g5StatusTxt = g5Pass === true
+        ? `✓ Grade ${g5Q} · R:R ${g5RR}:1`
+        : g5Pass === false
+          ? `✗ ${g5Q ? 'Grade '+g5Q+' ' : ''}S/R`
+          : '— model FLAT';
+    const g5TimeTxt   = g5Pass === true
+        ? `entry ${g5Q} · R:R ${g5RR}:1`
+        : g5Pass === false
+          ? (g5.reason || 'S/R fail').substring(0, 60)
+          : 'no direction to validate';
+    styleStage(`${key}PipeGate05`, `${key}PipeG5Name`, `${key}PipeG5Status`, `${key}PipeG5Time`,
+               g5Pass, color, g5StatusTxt, g5TimeTxt);
+
+    const g6     = pc.gate6 || {};
+    const g6Has  = pc.gate6 !== undefined && pc.gate6 !== null;
+    const g6Pass = g6Has ? !!g6.passed : null;
+    const g6Conf = g6.confidence != null ? Math.round(g6.confidence * 100) : confPct;
+    const g6Thr  = g6.threshold  != null ? Math.round(g6.threshold * 100)  : 60;
+    const g6StatusTxt = g6Pass === true
+        ? `✓ ${g6Conf}% ≥ ${g6Thr}%`
+        : g6Pass === false
+          ? `✗ ${g6Conf}% < ${g6Thr}%`
+          : '— model FLAT';
+    const g6TimeTxt   = g6Pass !== null
+        ? (g6.capital_mode || 'CONF CHECK')
+        : 'no direction to validate';
+    styleStage(`${key}PipeGate06`, `${key}PipeG6Name`, `${key}PipeG6Status`, `${key}PipeG6Time`,
+               g6Pass, color, g6StatusTxt, g6TimeTxt);
+
+    // Regime-mismatch tint: a counter-regime signal still passes the gates
+    // but gets sized at 0.5× — surface this clearly so the operator knows.
+    const regimeMatch = pc.regime_match;
+    const regimeWarn  = regimeMatch === false && pc.direction && pc.direction !== 'FLAT';
+
+    // Output for this category
+    const passed = !!pc.passed;
+    const outEl  = document.getElementById(`${key}PipeOutSignal`);
+    if (outEl) {
+      outEl.textContent = passed ? (dir || 'SIGNAL') : (pc.direction === 'FLAT' ? 'FLAT' : '—');
+      outEl.style.color = passed && dir === 'LONG' ? 'var(--green)'
+                        : passed && dir === 'SHORT' ? 'var(--red)'
+                        : 'var(--text3)';
+    }
+    const outStage = document.getElementById(`${key}PipeOutput`);
+    if (outStage) {
+      outStage.style.borderColor = passed ? color : 'var(--text3)';
+      outStage.style.background  = passed ? 'rgba(0,229,255,0.05)' : 'transparent';
+    }
+    const outDetail = document.getElementById(`${key}PipeOutDetail`);
+    if (outDetail) {
+      const price = h.price || 0;
+      outDetail.textContent = passed && price > 0
+          ? `₹${Math.round(price)} · ${confPct}% conf`
+          : (pc.reason ? pc.reason.substring(0, 32) : 'awaiting');
+    }
+
+    // Header verdict label
+    const verdict = document.getElementById(`${key}Verdict`);
+    if (verdict) {
+      if (passed && regimeWarn) {
+        verdict.textContent = '✓ SIGNAL · COUNTER-REGIME 0.5×';
+        verdict.style.color = 'var(--amber)';
+      } else if (passed) {
+        verdict.textContent = '✓ SIGNAL EMITTED';
+        verdict.style.color = color;
+      } else if (isFlatCat) {
+        verdict.textContent = 'MODEL FLAT';
+        verdict.style.color = 'var(--text3)';
+      } else if (pc.reason) {
+        verdict.textContent = 'BLOCKED';
+        verdict.style.color = 'var(--red)';
+      } else {
+        verdict.textContent = 'AWAITING';
+        verdict.style.color = 'var(--text3)';
+      }
+    }
+  }
+}
+
+// ── FEATURE IMPORTANCE ──
+function updateFeatureImportance(d) {
+  const panel = document.getElementById('featureImportancePanel');
+  if (!panel) return;
+  const fi = d.feature_importance || [];
+  if (!fi.length) { panel.innerHTML = '<div style="color:var(--text3);font-size:9px;padding:6px 0">Feature data not yet available — run signal cycle.</div>'; return; }
+  const colors = ['var(--green)','var(--green)','var(--blue)','var(--blue)','var(--blue)','var(--amber)','var(--amber)','var(--amber)'];
+  panel.innerHTML = fi.map((f, i) => {
+    const c = colors[i] || 'var(--text3)';
+    return `<div class="wf-item">
+      <span class="wf-name">${f.name}</span>
+      <div class="wf-bar-wrap"><div class="wf-bar" style="width:${Math.min(f.pct*5,100)}%;background:${c}">${f.pct}%</div></div>
+      <span class="wf-val" style="color:${c}">+${f.pct}</span>
+    </div>`;
+  }).join('');
+}
+
+// ── SUPPORT / RESISTANCE ──
+function updateSupportResistance(d) {
+  const price = (d.selected_bank || {}).price || 0;
+  const hi52  = (d.selected_bank || {}).week52_high || 0;
+  const candles = d.chart_1w || d.chart_1d || [];
+  if (!price) return;
+
+  const highs = candles.map(c => c.h || c.c).filter(Boolean);
+  const lows  = candles.map(c => c.l || c.c).filter(Boolean);
+  const wHigh = highs.length ? Math.max(...highs) : price * 1.05;
+  const wLow  = lows.length  ? Math.min(...lows)  : price * 0.95;
+  const atr   = price * 0.012;
+
+  const r1 = Math.round(wHigh);
+  const r2 = Math.round(wHigh + atr * 2);
+  const r3 = Math.round(hi52 > price ? hi52 : price * 1.06);
+  const s1 = Math.round(wLow);
+  const s2 = Math.round(wLow - atr * 2);
+  const s3 = Math.round(wLow - atr * 4);
+
+  setEl('srR1', `₹${r1.toLocaleString('en-IN')}`);
+  setEl('srR2', `₹${r2.toLocaleString('en-IN')}`);
+  setEl('srR3', `₹${r3.toLocaleString('en-IN')}`);
+  setEl('srS1', `₹${s1.toLocaleString('en-IN')}`);
+  setEl('srS2', `₹${s2.toLocaleString('en-IN')}`);
+  setEl('srS3', `₹${s3.toLocaleString('en-IN')}`);
+  setEl('srCurrentPrice', `₹${Math.round(price).toLocaleString('en-IN')}`);
+
+  const pctToR1 = r1 > price ? ((r1 - price) / price * 100).toFixed(1) : 0;
+  const pctToS1 = price > s1 ? ((price - s1) / price * 100).toFixed(1) : 0;
+  const nearSup = parseFloat(pctToS1) < parseFloat(pctToR1);
+  setEl('srCurrentStatus', nearSup ? 'NEAR SUPPORT ✓' : 'NEAR RESISTANCE ⚠');
+  setEl('srEntryZone', pctToR1 > 0 ? `${pctToR1}% to R1 target` : '—');
+}
+
+// ── INTERMARKET VERDICT BADGE ──
+function updateIntermarketBadge(d) {
+  const verdict = (d.global || {}).verdict || '';
+  const badge = document.getElementById('imVerdictBadge');
+  if (!badge || !verdict) return;
+  badge.textContent = verdict;
+  badge.className = verdict === 'BULLISH' ? 'badge badge-green'
+                  : verdict === 'BEARISH' ? 'badge badge-red'
+                  : 'badge badge-amber';
+}
+
+// ── EXIT CONDITIONS ──
+function updateExitConditions(d) {
+  const ex = d.exit_engine || {};
+  const tr = d.trade || {};
+  const r  = d.regime || {};
+  const panel = document.getElementById('exitConditions');
+  const recEl = document.getElementById('exitRecommendation');
+  if (!panel) return;
+
+  if (!ex.active) {
+    panel.innerHTML = '<div style="color:var(--text3);font-size:9px;padding:6px 0">No open trade — conditions will appear when a position is active.</div>';
+    if (recEl) { recEl.textContent = 'NO OPEN POSITION'; recEl.style.color = 'var(--text3)'; }
+    return;
+  }
+
+  const ts    = ex.trail_stop || 0;
+  const pnl   = ex.unrealized_pnl || 0;
+  const days  = ex.days_held || 0;
+  const regime = r.name || '—';
+  const target = tr.target || 0;
+
+  const row = (color, text, label) =>
+    `<div class="alert-item" style="padding:5px 0">
+      <div class="alert-icon" style="background:${color}"></div>
+      <div class="alert-text">${text}</div>
+      <div style="font-size:8px;color:${color}">${label}</div>
+    </div>`;
+
+  panel.innerHTML = [
+    row(ts > 0 ? 'var(--green)' : 'var(--text3)',
+        ts > 0 ? `Trailing stop: ₹${f2(ts)} (P&L ${pnl>=0?'+':''}${f2(pnl)}%)` : 'Trailing stop: not yet armed',
+        ts > 0 ? 'ARMED' : 'WAITING'),
+    row('var(--text3)', 'Signal reversal: monitoring for opposite signal', 'WATCH'),
+    row(days < 6 ? 'var(--amber)' : 'var(--red)',
+        `Time exit: Day 7 max hold (Day ${days} now)`,
+        `DAY ${days}/7`),
+    row(regime.includes('BULL') ? 'var(--green)' : 'var(--amber)',
+        `Regime: ${regime.replace('_',' ')}`,
+        regime.includes('BULL') ? 'OK' : 'WATCH'),
+  ].join('');
+
+  if (recEl) {
+    const rec = pnl >= 2 ? `HOLD · TARGET ₹${Math.round(target).toLocaleString('en-IN')}`
+              : pnl <= -1 ? 'REVIEW · APPROACHING STOP'
+              : 'HOLD · MONITOR';
+    recEl.textContent = rec;
+    recEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  }
+}
+
+// ── MASTER UPDATE ──
+function _safe(fn, d) { try { fn(d); } catch(e) { console.warn(fn.name + ' failed:', e.message); } }
+
+function updateDashboard(d) {
+  liveData = d;
+  if (d.ist) setEl('clockDate', `IST · ${d.ist}`);
+  // Each update runs in isolation — one crash cannot block the chart
+  _safe(updatePriceHero, d);
+  _safe(updateRegime, d);
+  _safe(updateNews, d);
+  _safe(updateFII, d);
+  _safe(updateIntermarket, d);
+  _safe(updateIntermarketBadge, d);
+  _safe(updateMacro, d);
+  _safe(updateUniverse, d);
+  _safe(updatePerformance, d);
+  _safe(updateLLM, d);
+  _safe(updateExit, d);
+  _safe(updateExitConditions, d);
+  _safe(buildTicker, d);
+  _safe(updateModelCards, d);
+  _safe(updateSwingFeatures, d);
+  _safe(updatePositionalFeatures, d);
+  _safe(updateIntradayFeatures, d);
+  _safe(updatePipeline, d);
+  _safe(updateFeatureImportance, d);
+  _safe(updateSupportResistance, d);
+  _safe(updateOrderFlow, d);
+
+  // Chart always runs — requestAnimationFrame ensures layout is ready before reading offsetWidth
+  if (currentPeriod === '1d' || currentPeriod === '1w') {
+    const candles = currentPeriod === '1w' ? d.chart_1w : d.chart_1d;
+    if (candles && candles.length >= 2) chartCandles = candles;
+  }
+  requestAnimationFrame(() => drawChart(chartCandles, -1));
+}
+
+// ── FETCH LOOP ──
+let _fetchCtrl = null;
+
+async function fetchLive() {
+  if (_fetchCtrl) _fetchCtrl.abort();
+  _fetchCtrl = new AbortController();
+  try {
+    const res = await fetch(buildApiUrl(), { signal: _fetchCtrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    updateDashboard(data);
+  } catch (e) {
+    if (e.name !== 'AbortError')
+      console.warn('API fetch failed:', e.message, '— retrying in 15s');
+  }
+}
+
+// Initial fetch + poll every 15 seconds
+fetchLive();
+setInterval(fetchLive, 15000);
+
+window.addEventListener('resize', () => requestAnimationFrame(() => drawChart(chartCandles, _chartHoverIdx)));
+// Draw placeholder immediately on page load so chart area isn't blank
+requestAnimationFrame(() => drawChart(chartCandles, -1));
+
+// ── ORDER FLOW (real data from OrderFlowAnalyzer) ──
+function drawDelta(barDeltas) {
+  const container = document.getElementById('deltaChart');
+  if (!container) return;
+  container.innerHTML = '';
+  // Show placeholder bars when no data yet
+  const bars = barDeltas && barDeltas.length ? barDeltas : null;
+  if (!bars) {
+    for (let i = 0; i < 20; i++) {
+      const d = document.createElement('div');
+      d.style.cssText = `width:4%;height:8px;background:var(--border2);border-radius:1px;flex-shrink:0;`;
+      container.appendChild(d);
+    }
+    return;
+  }
+  const maxVol = Math.max(...bars.map(b => Math.max(b.buy + b.sell, 1)));
+  bars.forEach(b => {
+    const h = Math.max(4, Math.round((b.buy + b.sell) / maxVol * 58));
+    const d = document.createElement('div');
+    d.style.cssText = `width:${100/bars.length-0.5}%;height:${h}px;` +
+      `background:${b.bull ? 'rgba(0,230,118,0.75)' : 'rgba(255,61,87,0.75)'};` +
+      `border-radius:1px;flex-shrink:0;`;
+    container.appendChild(d);
+  });
+}
+
+function updateOrderFlow(d) {
+  const of = d.order_flow || {};
+
+  // Delta chart — real buy/sell volumes
+  drawDelta(of.bar_deltas || null);
+
+  // CUM DELTA
+  const cumDelta = of.cum_delta;
+  const cdEl = document.getElementById('ofCumDelta');
+  if (cdEl) {
+    if (cumDelta == null || cumDelta === undefined) { cdEl.textContent = '—'; cdEl.style.color = 'var(--text3)'; }
+    else {
+      const sign = cumDelta >= 0 ? '+' : '';
+      cdEl.textContent = sign + Math.abs(cumDelta).toLocaleString('en-IN');
+      cdEl.style.color = cumDelta >= 0 ? 'var(--green)' : 'var(--red)';
+    }
+  }
+
+  // DELTA SIGNAL
+  const dsEl  = document.getElementById('ofDeltaSignal');
+  const sigMap = {
+    STRONG_BUYING_PRESSURE:  { text: 'STRONG BUY PRESSURE',  color: 'var(--green)' },
+    MILD_BUYING_PRESSURE:    { text: 'MILD BUY PRESSURE',    color: 'var(--green)' },
+    STRONG_SELLING_PRESSURE: { text: 'STRONG SELL PRESSURE', color: 'var(--red)'   },
+    MILD_SELLING_PRESSURE:   { text: 'MILD SELL PRESSURE',   color: 'var(--red)'   },
+    BALANCED_FLOW:           { text: 'BALANCED FLOW',        color: 'var(--amber)'  },
+  };
+  if (dsEl && of.order_flow_signal) {
+    const s = sigMap[of.order_flow_signal] || { text: of.order_flow_signal, color: 'var(--text3)' };
+    dsEl.textContent = s.text;
+    dsEl.style.color = s.color;
+    const box = dsEl.parentElement;
+    if (box) {
+      box.style.background = of.order_flow_signal.includes('BUYING') ? 'var(--green-dim)' :
+                             of.order_flow_signal.includes('SELLING') ? 'var(--red-dim)' : 'var(--bg2)';
+      box.style.borderColor = of.order_flow_signal.includes('BUYING') ? 'rgba(0,230,118,0.2)' :
+                              of.order_flow_signal.includes('SELLING') ? 'rgba(255,61,87,0.2)' : 'var(--border)';
+    }
+  }
+
+  // INST. BIAS
+  const biasEl = document.getElementById('ofInstBias');
+  if (biasEl) {
+    const b = of.inst_bias || '';
+    const conv = of.inst_conviction || '';
+    if (!b || b === 'NEUTRAL') { biasEl.textContent = 'NEUTRAL'; biasEl.style.color = 'var(--text3)'; }
+    else if (b.includes('BUYING'))  { biasEl.textContent = `BUYING${conv==='HIGH'?' ★':''}`; biasEl.style.color = 'var(--green)'; }
+    else if (b.includes('SELLING')) { biasEl.textContent = `SELLING${conv==='HIGH'?' ★':''}`; biasEl.style.color = 'var(--red)'; }
+    else { biasEl.textContent = b; biasEl.style.color = 'var(--text3)'; }
+  }
+
+  // VWAP
+  const vwapEl = document.getElementById('ofVwap');
+  if (vwapEl) {
+    const v = of.vwap_signal || '';
+    if (v === 'ABOVE_VWAP')  { vwapEl.textContent = 'ABOVE ✓'; vwapEl.style.color = 'var(--green)'; }
+    else if (v === 'BELOW_VWAP') { vwapEl.textContent = 'BELOW ✗'; vwapEl.style.color = 'var(--red)'; }
+    else if (v === 'AT_VWAP')    { vwapEl.textContent = 'AT VWAP'; vwapEl.style.color = 'var(--amber)'; }
+    else { vwapEl.textContent = '—'; vwapEl.style.color = 'var(--text3)'; }
+  }
+
+  // ABSORPTION
+  const absEl = document.getElementById('ofAbsorption');
+  if (absEl) {
+    const a = of.absorption || 'NONE';
+    if (a === 'STRONG')   { absEl.textContent = 'STRONG ⚠'; absEl.style.color = 'var(--red)'; }
+    else if (a === 'MODERATE') { absEl.textContent = 'DETECTED ⚠'; absEl.style.color = 'var(--amber)'; }
+    else { absEl.textContent = 'NONE ✓'; absEl.style.color = 'var(--green)'; }
+  }
+}
+drawDelta(null);
+</script>
+</body>
+</html>

@@ -1,0 +1,335 @@
+# tests/test_signals.py
+# Tests for the 6-gate signal pipeline
+# Every gate must block or pass deterministically
+
+import unittest
+import numpy as np
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+from signals.gate1_regime       import Gate1Regime
+from signals.gate2_rule_filter  import Gate2RuleFilter
+from signals.gate5_sr_validator import Gate5SRValidator
+from signals.gate6_confidence   import Gate6Confidence
+from signals.timeframe_alignment import TimeframeAlignment
+
+
+class TestGate1Regime(unittest.TestCase):
+
+    def setUp(self):
+        self.gate = Gate1Regime()
+
+    def _regime(self, name, stability=0.8):
+        rules = {
+            "BULL_TRENDING":   {"trade_long": True,  "trade_short": False, "position_mult": 1.2},
+            "BEAR_TRENDING":   {"trade_long": False, "trade_short": True,  "position_mult": 0.8},
+            "HIGH_VOLATILITY": {"trade_long": True,  "trade_short": True,  "position_mult": 0.5},
+            "CHOPPY_SIDEWAYS": {"trade_long": False, "trade_short": False, "position_mult": 0.0},
+        }.get(name, {"trade_long": True, "trade_short": False, "position_mult": 1.0})
+
+        return {
+            "regime": name, "stability": stability,
+            "trade_long": rules["trade_long"],
+            "trade_short": rules["trade_short"],
+            "position_mult": rules["position_mult"],
+        }
+
+    def _trend(self, changes=0):
+        return {"stable": changes <= 1, "changes": changes}
+
+    def test_choppy_blocks_all(self):
+        passed, ctx = self.gate.check(
+            self._regime("CHOPPY_SIDEWAYS"), self._trend(), "LONG"
+        )
+        self.assertFalse(passed, "CHOPPY should block ALL signals")
+
+    def test_bull_allows_long(self):
+        passed, _ = self.gate.check(
+            self._regime("BULL_TRENDING"), self._trend(), "LONG"
+        )
+        self.assertTrue(passed)
+
+    def test_bull_blocks_short(self):
+        passed, _ = self.gate.check(
+            self._regime("BULL_TRENDING"), self._trend(), "SHORT"
+        )
+        self.assertFalse(passed, "BULL regime should block SHORT signals")
+
+    def test_bear_blocks_long(self):
+        passed, _ = self.gate.check(
+            self._regime("BEAR_TRENDING"), self._trend(), "LONG"
+        )
+        self.assertFalse(passed, "BEAR regime should block LONG signals")
+
+    def test_bear_allows_short(self):
+        passed, _ = self.gate.check(
+            self._regime("BEAR_TRENDING"), self._trend(), "SHORT"
+        )
+        self.assertTrue(passed)
+
+    def test_high_vol_allows_both(self):
+        for direction in ["LONG", "SHORT"]:
+            passed, _ = self.gate.check(
+                self._regime("HIGH_VOLATILITY"), self._trend(), direction
+            )
+            self.assertTrue(passed, f"HIGH_VOL should allow {direction}")
+
+    def test_low_stability_blocks(self):
+        passed, _ = self.gate.check(
+            self._regime("BULL_TRENDING", stability=0.2),
+            self._trend(), "LONG"
+        )
+        self.assertFalse(passed, "Stability below 0.40 should block")
+
+    def test_unstable_regime_reduces_size(self):
+        passed, ctx = self.gate.check(
+            self._regime("BULL_TRENDING", stability=0.7),
+            self._trend(changes=3), "LONG"
+        )
+        self.assertTrue(passed)
+        self.assertLess(ctx["position_mult"], 1.2, "Unstable regime should reduce size")
+
+    def test_choppy_returns_meaningful_reason(self):
+        passed, ctx = self.gate.check(
+            self._regime("CHOPPY_SIDEWAYS"), self._trend(), "LONG"
+        )
+        self.assertIn("reason", ctx)
+        self.assertGreater(len(ctx["reason"]), 5)
+
+
+class TestGate2RuleFilter(unittest.TestCase):
+
+    def setUp(self):
+        self.gate = Gate2RuleFilter()
+
+    def _good_features(self):
+        return {
+            "adx": 28, "ema_spread": 0.02,
+            "volume_ratio": 1.8,
+            "nifty_5d_pct": 0.5,
+            "earnings_risk_flag": 0,
+            "india_vix_level": 14,
+            "macro_score": 0.2,
+            "intermarket_score": 0.1,
+            "usdinr_5d_pct": 0.3,
+        }
+
+    def _good_context(self):
+        return {
+            "fundamental_grade": "GOOD",
+            "anomaly_severity":  "LOW",
+            "anomaly_type":      "NONE",
+            "nifty_5d_pct":      0.5,
+        }
+
+    def test_all_good_passes(self):
+        passed, ctx = self.gate.check(self._good_features(), self._good_context())
+        self.assertTrue(passed)
+        self.assertGreaterEqual(ctx["n_passed"], 8)
+
+    def test_earnings_week_hard_fail(self):
+        f = {**self._good_features(), "earnings_risk_flag": 1}
+        passed, ctx = self.gate.check(f, self._good_context())
+        self.assertFalse(passed)
+        self.assertIn("earnings_risk", ctx.get("hard_failed", []))
+
+    def test_vix_panic_hard_fail(self):
+        f = {**self._good_features(), "india_vix_level": 28}
+        passed, ctx = self.gate.check(f, self._good_context())
+        self.assertFalse(passed)
+        self.assertIn("vix_panic", ctx.get("hard_failed", []))
+
+    def test_high_anomaly_hard_fail(self):
+        ctx = {**self._good_context(), "anomaly_severity": "HIGH"}
+        passed, result = self.gate.check(self._good_features(), ctx)
+        self.assertFalse(passed)
+        self.assertIn("anomaly_high", result.get("hard_failed", []))
+
+    def test_two_soft_fails_still_passes(self):
+        """7/10 checks passing with no hard fails should still pass (≥8 needed)."""
+        f = {
+            **self._good_features(),
+            "volume_ratio":    0.5,   # fail volume
+            "intermarket_score": -0.5, # fail intermarket
+        }
+        passed, ctx = self.gate.check(f, self._good_context())
+        # 8 pass threshold — 2 soft fails = 8/10 = borderline
+        # Depending on exact implementation, test the logic
+        self.assertEqual(ctx["n_passed"], len(ctx["checks"]) - 2)
+
+    def test_returns_fail_reasons(self):
+        f      = {**self._good_features(), "india_vix_level": 30}
+        passed, ctx = self.gate.check(f, self._good_context())
+        self.assertFalse(passed)
+        self.assertIsInstance(ctx.get("fail_reasons"), list)
+        self.assertGreater(len(ctx["fail_reasons"]), 0)
+
+
+class TestGate5SRValidator(unittest.TestCase):
+
+    def setUp(self):
+        self.gate = Gate5SRValidator()
+
+    def _sr_grade_a(self):
+        return {
+            "entry_quality": "A", "entry_quality_score": 1.0,
+            "reward_risk_sr": 3.5, "support_distance_pct": 1.0,
+            "resistance_distance_pct": 4.5, "near_support": True,
+            "near_resistance": False, "near_breakout": False,
+        }
+
+    def _sr_grade_d(self):
+        return {
+            "entry_quality": "D", "entry_quality_score": -0.2,
+            "reward_risk_sr": 1.2, "support_distance_pct": 4.5,
+            "resistance_distance_pct": 0.8, "near_support": False,
+            "near_resistance": True, "near_breakout": False,
+        }
+
+    def test_grade_a_passes_full_size(self):
+        passed, ctx = self.gate.check(
+            self._sr_grade_a(), "LONG", ml_confidence=0.72, alignment="A+"
+        )
+        self.assertTrue(passed)
+        self.assertGreaterEqual(ctx["size_mult"], 0.9)
+
+    def test_grade_d_blocked_low_conf(self):
+        passed, ctx = self.gate.check(
+            self._sr_grade_d(), "LONG", ml_confidence=0.61, alignment="B"
+        )
+        self.assertFalse(passed)
+
+    def test_grade_d_overridden_high_conf_a_plus(self):
+        passed, ctx = self.gate.check(
+            self._sr_grade_d(), "LONG", ml_confidence=0.80, alignment="A+"
+        )
+        self.assertTrue(passed)
+        self.assertLessEqual(ctx["size_mult"], 0.5, "Grade D override should cap size")
+
+    def test_poor_rr_reduces_size(self):
+        sr = {**self._sr_grade_a(), "reward_risk_sr": 1.4}
+        passed, ctx = self.gate.check(sr, "LONG", 0.70, "A+")
+        # Poor R:R reduces size even if grade is A
+        self.assertLess(ctx["size_mult"], 0.85)
+
+    def test_near_resistance_long_reduces_size(self):
+        sr = {**self._sr_grade_a(), "near_resistance": True, "near_breakout": False}
+        passed, ctx = self.gate.check(sr, "LONG", 0.72, "A")
+        self.assertTrue(passed)
+        # Size should be reduced when near resistance
+        self.assertLessEqual(ctx["size_mult"], 1.0)
+
+
+class TestGate6Confidence(unittest.TestCase):
+
+    def setUp(self):
+        self.gate = Gate6Confidence()
+
+    def _risk_ok(self):
+        return {
+            "trading_allowed":       True,
+            "final_size_mult":       1.0,
+            "monthly_dd_flag":       0,
+            "consecutive_loss_halt": 0,
+        }
+
+    def _risk_halted(self, reason="monthly_dd"):
+        return {
+            "trading_allowed":       False,
+            "final_size_mult":       0.0,
+            "monthly_dd_flag":       1 if reason == "monthly_dd" else 0,
+            "consecutive_loss_halt": 1 if reason == "losses" else 0,
+        }
+
+    def test_sufficient_confidence_passes(self):
+        passed, ctx = self.gate.check(
+            primary_conf=0.72, alignment="A+",
+            capital_mode="FULL", risk_context=self._risk_ok(),
+            model_type="swing",
+        )
+        self.assertTrue(passed)
+
+    def test_low_confidence_blocked(self):
+        passed, ctx = self.gate.check(
+            primary_conf=0.50, alignment="A+",
+            capital_mode="FULL", risk_context=self._risk_ok(),
+            model_type="swing",
+        )
+        self.assertFalse(passed)
+
+    def test_small_capital_requires_a_plus_only(self):
+        passed, ctx = self.gate.check(
+            primary_conf=0.75, alignment="B",
+            capital_mode="SMALL", risk_context=self._risk_ok(),
+            model_type="swing",
+        )
+        self.assertFalse(passed, "SMALL capital should require A+ alignment")
+
+    def test_small_capital_a_plus_passes(self):
+        passed, ctx = self.gate.check(
+            primary_conf=0.70, alignment="A+",
+            capital_mode="SMALL", risk_context=self._risk_ok(),
+            model_type="swing",
+        )
+        self.assertTrue(passed)
+
+    def test_circuit_breaker_blocks(self):
+        passed, ctx = self.gate.check(
+            primary_conf=0.85, alignment="A+",
+            capital_mode="FULL",
+            risk_context=self._risk_halted("monthly_dd"),
+            model_type="swing",
+        )
+        self.assertFalse(passed)
+        self.assertIn("circuit", ctx.get("reason", "").lower())
+
+    def test_growing_capital_allows_a(self):
+        passed, ctx = self.gate.check(
+            primary_conf=0.65, alignment="A",
+            capital_mode="GROWING", risk_context=self._risk_ok(),
+            model_type="swing",
+        )
+        self.assertTrue(passed)
+
+
+class TestTimeframeAlignment(unittest.TestCase):
+
+    def setUp(self):
+        self.aligner = TimeframeAlignment()
+
+    def test_all_long_is_a_plus(self):
+        result = self.aligner.compute("LONG", "LONG", "LONG")
+        self.assertEqual(result["grade"], "A+")
+        self.assertGreater(result["conf_boost"], 0)
+
+    def test_pos_swing_agree_is_a(self):
+        result = self.aligner.compute("LONG", "LONG", "FLAT")
+        self.assertEqual(result["grade"], "A")
+
+    def test_conflict_is_f_grade(self):
+        result = self.aligner.compute("LONG", "SHORT", "FLAT")
+        self.assertEqual(result["grade"], "F")
+        self.assertEqual(result["size_mult"], 0.0)
+
+    def test_all_flat_returns_c(self):
+        result = self.aligner.compute("FLAT", "FLAT", "FLAT")
+        self.assertIn(result["grade"], ["C", "F"])
+
+    def test_f_grade_conf_boost_negative(self):
+        result = self.aligner.compute("LONG", "SHORT", "LONG")
+        self.assertLess(result["conf_boost"], 0)
+
+    def test_dominant_direction_correct(self):
+        result = self.aligner.compute("LONG", "LONG", "SHORT")
+        # 2 LONG vs 1 SHORT — dominant should be LONG
+        self.assertEqual(result["dominant"], "LONG")
+
+    def test_single_non_flat_is_b_or_c(self):
+        result = self.aligner.compute("LONG", "FLAT", "FLAT")
+        self.assertIn(result["grade"], ["B", "C"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

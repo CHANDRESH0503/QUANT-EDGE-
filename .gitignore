@@ -1,0 +1,58 @@
+# .gitignore — QUANT EDGE
+
+# Credentials — NEVER commit these
+.env
+*.env
+secrets.py
+
+# Database — contains real trade data
+database/trading.db
+database/*.db
+
+# Model artifacts — too large for git
+models/saved/*.pkl
+models/saved/finbert_cache/
+models/evaluation/*.json
+
+# Logs — runtime data
+logs/*.csv
+logs/*.txt
+logs/*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environment
+.venv/
+venv/
+env/
+.env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+*.ipynb
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Railway / deployment
+railway.toml
+Procfile
