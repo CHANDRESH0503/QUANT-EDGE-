@@ -1974,9 +1974,28 @@ document.addEventListener('DOMContentLoaded', function() {
   if (badge) badge.textContent = selectedTicker.replace('.NS','') + ' · NSE';
 });
 
+// Where to hit the API:
+//   - When the page is served from a real host (the VPS via FastAPI/Nginx),
+//     use that same origin → same-origin requests, no CORS preflight.
+//   - When opened locally as a file:// or off localhost (dev), point at the
+//     production VPS at 165.22.220.126.
+// To override, set `?api=http://other.host` on the URL once — it sticks in
+// localStorage for the rest of the session.
+const API_BASE = (() => {
+  const override = new URLSearchParams(location.search).get('api');
+  if (override) { localStorage.setItem('quantedge_api', override); return override; }
+  const stored = localStorage.getItem('quantedge_api');
+  if (stored) return stored;
+  const isLocal = location.protocol === 'file:' ||
+                  location.hostname === '' ||
+                  location.hostname === 'localhost' ||
+                  location.hostname === '127.0.0.1';
+  return isLocal ? 'http://165.22.220.126' : location.origin;
+})();
+
 function buildApiUrl(path) {
   const base = path || '/api/live';
-  return `http://localhost:8000${base}?ticker=${encodeURIComponent(selectedTicker)}`;
+  return `${API_BASE}${base}?ticker=${encodeURIComponent(selectedTicker)}`;
 }
 
 let _bankSwitchTimer = null;
