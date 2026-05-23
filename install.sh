@@ -69,7 +69,18 @@ PY
 
 echo "▶ [6/6] Initialise SQLite schema"
 mkdir -p database logs models
-python -c "from data.news_fetcher import NewsFetcher; NewsFetcher()" || true
+# Full schema bootstrap: creates every table (news, open_trades, closed_trades,
+# signal_outcomes, earnings_calendar, options_snapshots, fundamentals, …) AND
+# applies the multi-bank `ticker` column migrations. Idempotent — safe to
+# re-run against an existing DB; only adds what's missing.
+python - <<'PY'
+from database.db_setup import DatabaseSetup
+from config import PathConfig
+PathConfig.ensure_dirs()
+DatabaseSetup(PathConfig.DB_PATH).setup_all()
+counts = DatabaseSetup(PathConfig.DB_PATH).verify()
+print(f"✓ Schema OK — {len(counts)} tables")
+PY
 
 echo ""
 echo "✅ Install complete."

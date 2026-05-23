@@ -158,6 +158,12 @@ class MultiBankOrchestrator:
         logger.info(f"DB       : {self.db_path}")
         logger.info("=" * 60)
 
+        # Ensure schema is up to date — adds the multi-bank `ticker` column to
+        # open_trades, closed_trades, signal_outcomes, feature_snapshots,
+        # options_snapshots, fundamentals, earnings_calendar if missing.
+        # Safe to run repeatedly (idempotent).
+        self._ensure_schema()
+
         # Load all per-ticker models once
         from models.train_all import ModelTrainer
         for t in self.tickers:
@@ -207,6 +213,7 @@ class MultiBankOrchestrator:
 
     def run_once(self) -> None:
         """Single cycle then exit. Useful for testing / cron-debug."""
+        self._ensure_schema()
         from models.train_all import ModelTrainer
         for t in self.tickers:
             try:
@@ -214,6 +221,23 @@ class MultiBankOrchestrator:
             except Exception as e:
                 logger.warning(f"[{t}] model load: {e}")
         self._cycle()
+
+    def _ensure_schema(self) -> None:
+        """Create any missing tables and apply pending ALTER TABLE migrations
+        (notably the multi-bank `ticker` columns). Mirrors main.py's startup.
+
+        Run defensively at every boot — DatabaseSetup.setup_all() is built to
+        be idempotent (`CREATE TABLE IF NOT EXISTS`, ALTER only if column
+        missing). Catching a fresh deploy that copied an older trading.db
+        without the ticker columns is the whole reason we run this here."""
+        try:
+            from database.db_setup import DatabaseSetup
+            DatabaseSetup(self.db_path).setup_all()
+        except Exception as e:
+            logger.error(f"_ensure_schema failed: {e}")
+            logger.error(traceback.format_exc())
+            # Don't crash — let the cycle attempt run; many tables will work
+            # even if migrations couldn't complete.
 
     # ─────────────────────────────────────────────────────────────────
     # ONE CYCLE
