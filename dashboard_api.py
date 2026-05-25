@@ -535,13 +535,21 @@ async def live_data(
             "SELECT * FROM open_trades WHERE status='OPEN' ORDER BY opened_at DESC LIMIT 1"
         )
 
-    # ── 4. Regime from DB ──────────────────────────────────────
+    # ── 4. Regime from DB (ticker-scoped; falls back to any row) ─
     regime_row = db_one("""
         SELECT regime, stability, bull_prob, bear_prob,
                high_vol_prob, choppy_prob
         FROM   regime_snapshots
+        WHERE  ticker = ? OR ticker IS NULL
         ORDER  BY detected_at DESC LIMIT 1
-    """)
+    """, (ticker,))
+    if not regime_row:
+        regime_row = db_one("""
+            SELECT regime, stability, bull_prob, bear_prob,
+                   high_vol_prob, choppy_prob
+            FROM   regime_snapshots
+            ORDER  BY detected_at DESC LIMIT 1
+        """)
 
     # ── 5. Sentiment from DB (ticker-scoped) ──────────────────
     since_24h = str(now - timedelta(hours=24))
@@ -657,44 +665,28 @@ async def live_data(
     else:
         sharpe = 0.0
 
-    # ── 11c. Capital mode + active signals from signal_log ─────
-    # signal_log is always written (even when scheduler isn't running).
-    # Used for: capital_mode, and as a fallback for open exposure when
-    # open_trades is empty (signals fired via --mode=signal, not via scheduler).
-    capital_mode  = "SMALL"
-    _log_open: list = []
+    # ── 11c. Capital mode from signal_log (read-only, never used for counts) ──
+    # signal_log is written even when the scheduler isn't running, so it is
+    # the most reliable source of the last capital_mode decision.
+    # ⚠️  We do NOT fall back to signal_log for open position counts or
+    #     exposure — that caused local (3 log entries) ≠ VPS (1 DB row) mismatch.
+    #     open_trades DB is the single source of truth for position counts.
+    capital_mode = "SMALL"
     try:
         import csv as _csv
-        _last_per_key: dict = {}
         with open("logs/signal_log.csv") as _f:
             for _r in _csv.DictReader(_f):
-                # Track capital mode from any row that has it
                 if _r.get("capital_mode"):
-                    capital_mode = _r["capital_mode"]
-                # Last row per (ticker, category) wins — captures flips to FLAT
-                _key = (_r.get("ticker", ""), _r.get("category", ""))
-                _last_per_key[_key] = _r
-        # Active signal = last row for that (ticker, cat) has status=SIGNAL
-        # with valid sizing (shares > 0, stop > 0).
-        for _v in _last_per_key.values():
-            if (_v.get("status") == "SIGNAL"
-                    and float(_v.get("shares", 0) or 0) > 0
-                    and float(_v.get("stop",   0) or 0) > 0):
-                _log_open.append({
-                    "shares":      int(float(_v.get("shares", 0))),
-                    "entry_price": float(_v.get("entry", 0) or 0),
-                    "ticker":      _v.get("ticker", ""),
-                    "trade_type":  _v.get("category", "swing"),
-                    "signal":      _v.get("signal", ""),
-                    "confidence":  float(_v.get("confidence", 0) or 0),
-                })
+                    capital_mode = _r["capital_mode"]   # last row wins
     except Exception:
         pass
 
-    # Use DB trades when available; fall back to signal_log-derived positions
-    _effective_open   = all_open if all_open else _log_open
-    open_exposure     = sum(int(r.get("shares", 0)) * safe_float(r.get("entry_price", 0)) for r in _effective_open)
-    open_trades_count = len(_effective_open)
+    # Always use the real DB — if empty, exposure = 0, count = 0 (accurate)
+    open_exposure     = sum(
+        int(r.get("shares", 0)) * safe_float(r.get("entry_price", 0))
+        for r in all_open
+    )
+    open_trades_count = len(all_open)
 
     # ── 11. Universe ranking (from batch cache — no extra network calls) ──
     universe = []
@@ -1237,43 +1229,13 @@ async def trades_data() -> JSONResponse:
         ORDER  BY opened_at DESC
     """)
 
-    # ── Signal-log fallback (mirrors /api/live logic exactly) ─────
-    # When open_trades DB is empty (e.g. VPS not yet updated, or signals
-    # fired via --mode=signal without the orchestrator opening positions),
-    # fall back to signal_log.csv so the modal shows the same count as
-    # the Portfolio Heat Map card.  Without this fallback the heat map
-    # says "3 open trades" but the modal shows 0 — a confusing mismatch.
-    if not open_rows:
-        try:
-            import csv as _csv
-            _last_per_key: dict = {}
-            with open("logs/signal_log.csv") as _f:
-                for _r in _csv.DictReader(_f):
-                    _key = (_r.get("ticker", ""), _r.get("category", ""))
-                    _last_per_key[_key] = _r
-            for _v in _last_per_key.values():
-                if (_v.get("status") == "SIGNAL"
-                        and float(_v.get("shares", 0) or 0) > 0
-                        and float(_v.get("stop",   0) or 0) > 0):
-                    _ep = float(_v.get("entry", 0) or 0)
-                    open_rows.append({
-                        "id":           None,           # no DB id — log-derived
-                        "ticker":       _v.get("ticker", "HDFCBANK.NS"),
-                        "signal":       _v.get("signal", "LONG"),
-                        "trade_type":   _v.get("category", "swing"),
-                        "entry_price":  _ep,
-                        "stop_price":   float(_v.get("stop",   0) or 0),
-                        "target_price": float(_v.get("target", 0) or 0),
-                        "shares":       int(float(_v.get("shares", 0) or 0)),
-                        "risk_amount":  float(_v.get("risk_amount", 0) or 0),
-                        "highest_price":_ep,
-                        "lowest_price": _ep,
-                        "opened_at":    _v.get("timestamp", ""),
-                        "signal_uuid":  _v.get("signal_uuid", ""),
-                        "_from_log":    True,   # flag for UI labelling
-                    })
-        except Exception:
-            pass
+    # ── No signal_log fallback here ──────────────────────────────
+    # open_trades DB is the ONLY source of truth for open positions.
+    # A signal_log fallback caused a permanent mismatch:
+    #   local  (empty DB)  → fell back to 3 old CSV entries → showed 3
+    #   VPS    (1 DB row)  → used real DB                   → showed 1
+    # Both environments should show their true DB state.  If the DB has
+    # 0 positions the modal shows 0 — that is accurate, not a bug.
 
     # Enrich with current price from batch cache (already populated by /api/live)
     _sym_map = {t.replace(".NS","").upper(): t for t in _UNIVERSE_SYMS}
@@ -1335,7 +1297,7 @@ async def trades_data() -> JSONResponse:
             "days_held":   days_held,
             "progress":    progress,
             "opened_at":   str(r.get("opened_at",""))[:16],
-            "from_log":    bool(r.get("_from_log")),   # True = signal-log derived, no DB row
+            "from_log":    False,   # always DB-sourced now
         })
 
     # ── Closed trades (last 50) ───────────────────────────────────

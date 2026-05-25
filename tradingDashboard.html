@@ -4021,20 +4021,10 @@ function ptRenderOpen(rows) {
     // Progress bar — green if positive, red if going backward
     const progColor = p.unreal_pct >= 0 ? '#00e676' : '#ff3d57';
 
-    // Signal-log derived rows (not yet opened in DB) shown with a muted badge
-    const fromLog   = !!p.from_log;
-    const logBadge  = fromLog
-      ? `<span style="font-size:8px;background:#1a2030;border:1px solid #2a3550;
-                      color:#4a5568;border-radius:3px;padding:1px 4px;margin-left:4px;
-                      vertical-align:middle;letter-spacing:.04em">LOG</span>`
-      : '';
-
     const tr = document.createElement('tr');
-    tr.style.opacity = fromLog ? '0.75' : '1';
     tr.innerHTML = `
       <td>
         <span style="font-family:'Syne',sans-serif;font-weight:700;color:#e8eaf0">${p.ticker}</span>
-        ${logBadge}
       </td>
       <td><span class="cat-badge ${catClass}">${catLabel}</span></td>
       <td><span class="dir-badge dir-${p.signal.toLowerCase()}">${p.signal === 'LONG' ? '▲ LONG' : '▼ SHORT'}</span></td>
