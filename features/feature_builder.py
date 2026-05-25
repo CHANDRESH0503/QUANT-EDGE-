@@ -319,7 +319,7 @@ class FeatureBuilder:
         self.order_flow  = OrderFlowAnalyzer()
         self.sr_engine   = SupportResistanceEngine()
         self.intermarket = IntermarketAnalyzer(db_path)
-        self.regime      = RegimeDetector(db_path)
+        self.regime      = RegimeDetector(db_path, ticker=ticker)
 
         # ── Data layer ─────────────────────────────────────────────
         self.price_fetcher    = PriceFetcher(ticker)

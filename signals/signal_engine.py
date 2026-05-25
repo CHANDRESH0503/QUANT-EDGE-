@@ -95,7 +95,7 @@ class SignalEngine:
 
         # Processors
         self.feature_builder = FeatureBuilder(ticker, capital, db_path)
-        self.regime_detector  = RegimeDetector(db_path)
+        self.regime_detector  = RegimeDetector(db_path, ticker=ticker)
         self.position_sizer   = PositionSizer()
         self.exit_engine      = ExitEngine(db_path)
 

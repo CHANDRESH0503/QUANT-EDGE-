@@ -140,18 +140,22 @@ DD multipliers: ≤−2%→1.0× | −4%→0.75× | −6%→0.50× | <−6%→0.
 - Dedup: per-category (`_last_signal_by_cat`). Paper trades tagged by `trade_type`.
 - Exit engine: ticker-scoped position queries (no cross-bank price contamination). Positions closed in DB before Telegram alert.
 - Reversal dedup: `(ticker, category, reversal_type)` tuple key — survives position ID churn. 5-min cycle skips POSITIONAL/SWING reversals.
-- **⚠️ VPS not yet updated** — run `git pull && systemctl restart quantedge-signal quantedge-api` on `165.22.220.126`, then `DELETE FROM open_trades WHERE status='OPEN'` to clear stale paper trades.
+- VPS updated and running (2026-05-25).
 
 ---
 
 ## What's Still Not Done ❌
 
 ### Immediate (Deploy blockers)
-0. **Deploy to VPS `165.22.220.126`** — all fixes are committed locally (commits d259532–e845347) but VPS still runs old code:
+0. **Standard deploy procedure** (NEVER delete open_trades blindly):
    ```bash
    ssh root@165.22.220.126
    cd ~/TradingBot && git pull
-   sqlite3 database/trading.db 'DELETE FROM open_trades WHERE status="OPEN";'
+   # ⚠️  DO NOT run DELETE FROM open_trades — that destroys live paper positions
+   # Only close positions if the code that manages them changed fundamentally.
+   # To gracefully close all before restart:
+   #   sqlite3 database/trading.db "UPDATE open_trades SET status='CLOSED' WHERE status='OPEN';"
+   #   sqlite3 database/trading.db "INSERT INTO closed_trades SELECT NULL,signal_uuid,ticker,signal,trade_type,entry_price,entry_price,shares,0,0,'DEPLOY_RESTART',datetime('now'),'CLOSED' FROM open_trades WHERE status='CLOSED' AND close_date IS NULL;"
    sudo systemctl restart quantedge-signal quantedge-api
    ```
 

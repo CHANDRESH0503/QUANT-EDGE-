@@ -73,7 +73,7 @@ class ModelTrainer:
         self.swing_trainer_prod      = SwingModelTrainer(variant="prod", ticker=ticker)
         self.intraday_trainer_prod   = IntradayModelTrainer(variant="prod", ticker=ticker)
         self.positional_trainer_prod = PositionalModelTrainer(variant="prod", ticker=ticker)
-        self.regime_trainer     = RegimeModelTrainer()
+        self.regime_trainer     = RegimeModelTrainer(ticker=ticker)
         self.feature_selector   = FeatureSelector()
 
         # Data

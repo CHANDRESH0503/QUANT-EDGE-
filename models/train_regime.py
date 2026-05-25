@@ -27,7 +27,15 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
 
-MODEL_PATH = "models/saved/regime_model.pkl"
+_MODEL_DIR  = "models/saved"
+# Legacy shared path — kept for backward compat load fallback only
+MODEL_PATH  = f"{_MODEL_DIR}/regime_model.pkl"
+
+
+def _regime_model_path(ticker: str) -> str:
+    """Per-ticker model path — each bank gets its own HMM."""
+    safe = ticker.replace(".NS", "").replace(".", "_")
+    return f"{_MODEL_DIR}/regime_model_{safe}.pkl"
 
 
 class RegimeModelTrainer:
@@ -57,7 +65,9 @@ class RegimeModelTrainer:
     N_ITER         = 1000
     COV_TYPE       = "full"
 
-    def __init__(self):
+    def __init__(self, ticker: str = "HDFCBANK.NS"):
+        self.ticker         = ticker
+        self._model_path    = _regime_model_path(ticker)
         self._model         = None
         self._scaler        = None
         self._state_map     = {}    # HMM state int → regime name
@@ -146,16 +156,19 @@ class RegimeModelTrainer:
         return self._metrics
 
     def load(self) -> bool:
-        """Load pre-trained regime model from disk."""
+        """Load pre-trained regime model from disk (per-ticker, then shared fallback)."""
+        path = self._model_path
+        if not os.path.exists(path):
+            path = MODEL_PATH   # legacy shared fallback
         try:
-            data = joblib.load(MODEL_PATH)
+            data = joblib.load(path)
             self._model     = data["model"]
             self._scaler    = data["scaler"]
-            self._state_map = data["state_map"]
-            logger.info(f"Regime model loaded | state_map={self._state_map}")
+            self._state_map = data.get("state_map", data.get("mapping", {}))
+            logger.info(f"[{self.ticker}] Regime model loaded from {path} | state_map={self._state_map}")
             return True
         except Exception as e:
-            logger.warning(f"Regime model load failed: {e}")
+            logger.warning(f"[{self.ticker}] Regime model load failed: {e}")
             return False
 
     def detect(self, df: pd.DataFrame) -> Dict:
@@ -299,8 +312,8 @@ class RegimeModelTrainer:
         direction   = np.sign(ret)
         consistency = float(abs(direction.rolling(14).mean().iloc[-1]))
 
-        # Volatility
-        hv10     = float(ret.rolling(10).std() * np.sqrt(252) * 100)
+        # Volatility (`.iloc[-1]` converts Series → scalar)
+        hv10     = float(ret.rolling(10).std().iloc[-1] * np.sqrt(252) * 100)
         high_vol = hv10 > 28
 
         if high_vol and hv10 > 32:
@@ -362,13 +375,14 @@ class RegimeModelTrainer:
         }.get(regime, "Unknown regime")
 
     def _save(self) -> None:
-        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+        path = self._model_path
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         joblib.dump({
             "model":     self._model,
             "scaler":    self._scaler,
             "state_map": self._state_map,
-        }, MODEL_PATH)
-        logger.info(f"Regime model saved to {MODEL_PATH}")
+        }, path)
+        logger.info(f"[{self.ticker}] Regime model saved to {path}")
 
     def _save_metrics(self) -> None:
         path = "models/evaluation/model_metrics.json"

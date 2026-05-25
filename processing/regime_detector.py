@@ -99,14 +99,24 @@ class RegimeDetector:
         },
     }
 
-    MODEL_PATH = "models/saved/regime_model.pkl"
+    # Per-ticker model paths — each bank has its own HMM trained on its own
+    # 25yr return/volatility distribution. A single shared model causes the
+    # HDFCBANK scaler to wildly misscale IndusInd's post-crash features.
+    _MODEL_DIR = "models/saved"
+
+    @staticmethod
+    def _model_path(ticker: str) -> str:
+        safe = ticker.replace(".NS", "").replace(".", "_")
+        return f"models/saved/regime_model_{safe}.pkl"
 
     def __init__(self, db_path: str = "database/trading.db",
+                 ticker: str = "HDFCBANK.NS",
                  n_components: int = 4):
-        self.db_path     = db_path
-        self.n_components= n_components
-        self._model      = None
-        self._scaler     = None
+        self.db_path      = db_path
+        self.ticker       = ticker
+        self.n_components = n_components
+        self._model       = None
+        self._scaler      = None
         self._setup_db()
         self._load_model()
 
@@ -179,37 +189,61 @@ class RegimeDetector:
         else:
             result = self._rule_based_detect(df)
 
-        # EMA override for borderline CHOPPY detections.
-        # The HMM can stay locked in CHOPPY even when price is clearly trending.
-        # When CHOPPY + EMA spread > ±2%, override to BEAR/BULL with reduced stability
-        # so the downstream gates (2/4/5/6) can make the final call.
+        # EMA + 200d override for borderline CHOPPY detections.
+        # The HMM can stay locked in CHOPPY even when price is clearly trending
+        # — especially for banks like INDUSINDBK that crashed then stabilised:
+        # the HDFCBANK-trained scaler misscales their features into the CHOPPY
+        # state.  We rescue with two checks:
+        #   1. EMA20 vs EMA50 spread > ±1.5% (was ±2%, too loose for post-crash)
+        #   2. 200-day EMA position: price < 200d EMA by ≥10% → BEAR fallback
         if result["regime"] == "CHOPPY_SIDEWAYS" and len(df) >= 50:
             close   = df["Close"]
             ema20   = float(close.ewm(span=20).mean().iloc[-1])
             ema50   = float(close.ewm(span=50).mean().iloc[-1])
-            spread  = (ema20 - ema50) / ema50  # positive = bullish
-            if spread < -0.02:          # clearly below 50-day EMA → mild BEAR
-                result = self._build_result(
-                    "BEAR_TRENDING",
-                    min(result["stability"], 0.65),
-                    {**result.get("probs", self._equal_probs()),
-                     "BEAR_TRENDING": 0.55, "CHOPPY_SIDEWAYS": 0.30},
-                )
-                logger.info(
-                    f"EMA override: CHOPPY→BEAR_TRENDING "
-                    f"(spread={spread:.2%}, stability capped at 65%)"
-                )
-            elif spread > 0.02:         # clearly above 50-day EMA → mild BULL
-                result = self._build_result(
-                    "BULL_TRENDING",
-                    min(result["stability"], 0.65),
-                    {**result.get("probs", self._equal_probs()),
-                     "BULL_TRENDING": 0.55, "CHOPPY_SIDEWAYS": 0.30},
-                )
-                logger.info(
-                    f"EMA override: CHOPPY→BULL_TRENDING "
-                    f"(spread={spread:.2%}, stability capped at 65%)"
-                )
+            spread  = (ema20 - ema50) / ema50   # positive = bullish
+
+            # 200-day EMA rescue for banks in a deep downtrend post-crash
+            ema200_val = None
+            if len(df) >= 200:
+                ema200_val = float(close.ewm(span=200).mean().iloc[-1])
+                price      = float(close.iloc[-1])
+                below_200d = (ema200_val - price) / ema200_val   # >0 means below
+                if below_200d >= 0.10:     # price ≥10% below 200-day EMA → BEAR
+                    result = self._build_result(
+                        "BEAR_TRENDING",
+                        min(result["stability"], 0.60),
+                        {**result.get("probs", self._equal_probs()),
+                         "BEAR_TRENDING": 0.60, "CHOPPY_SIDEWAYS": 0.25},
+                    )
+                    logger.info(
+                        f"[{self.ticker}] 200d override: CHOPPY→BEAR_TRENDING "
+                        f"(price {below_200d:.1%} below 200d EMA)"
+                    )
+
+            # EMA20/50 spread rescue (threshold lowered 2%→1.5%)
+            if result["regime"] == "CHOPPY_SIDEWAYS":
+                if spread < -0.015:       # below 50-day EMA → mild BEAR
+                    result = self._build_result(
+                        "BEAR_TRENDING",
+                        min(result["stability"], 0.65),
+                        {**result.get("probs", self._equal_probs()),
+                         "BEAR_TRENDING": 0.55, "CHOPPY_SIDEWAYS": 0.30},
+                    )
+                    logger.info(
+                        f"[{self.ticker}] EMA override: CHOPPY→BEAR_TRENDING "
+                        f"(spread={spread:.2%}, stability capped at 65%)"
+                    )
+                elif spread > 0.015:      # above 50-day EMA → mild BULL
+                    result = self._build_result(
+                        "BULL_TRENDING",
+                        min(result["stability"], 0.65),
+                        {**result.get("probs", self._equal_probs()),
+                         "BULL_TRENDING": 0.55, "CHOPPY_SIDEWAYS": 0.30},
+                    )
+                    logger.info(
+                        f"[{self.ticker}] EMA override: CHOPPY→BULL_TRENDING "
+                        f"(spread={spread:.2%}, stability capped at 65%)"
+                    )
 
         # Save to DB for trend tracking
         self._save_regime_snapshot(result)
@@ -270,14 +304,16 @@ class RegimeDetector:
         """
         Has the regime been stable or shifting recently?
         Regime change within last 3 days = extra caution.
+        Scoped to this instance's ticker — never mixes IndusInd with HDFC.
         """
         since = datetime.now() - timedelta(days=days)
         conn  = self._connect()
         rows  = conn.execute("""
             SELECT regime, detected_at FROM regime_snapshots
             WHERE  detected_at > ?
+              AND  (ticker = ? OR ticker IS NULL)
             ORDER  BY detected_at DESC
-        """, (str(since),)).fetchall()
+        """, (str(since), self.ticker)).fetchall()
         conn.close()
 
         if not rows:
@@ -482,41 +518,53 @@ class RegimeDetector:
         return {r: 0.25 for r in self.REGIME_NAMES.values()}
 
     def _save_model(self) -> None:
-        """Persist trained HMM and scaler to disk."""
+        """Persist trained HMM and scaler to disk (per-ticker path)."""
+        path = self._model_path(self.ticker)
         try:
-            os.makedirs(os.path.dirname(self.MODEL_PATH), exist_ok=True)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             joblib.dump(
                 {"model": self._model, "scaler": self._scaler,
                  "state_map": getattr(self, "_state_to_regime", {})},
-                self.MODEL_PATH,
+                path,
             )
-            logger.info(f"Regime model saved to {self.MODEL_PATH}")
+            logger.info(f"[{self.ticker}] Regime model saved to {path}")
         except Exception as e:
-            logger.error(f"Failed to save regime model: {e}")
+            logger.error(f"[{self.ticker}] Failed to save regime model: {e}")
 
     def _load_model(self) -> None:
-        """Load pre-trained HMM from disk on startup."""
-        if not os.path.exists(self.MODEL_PATH):
+        """Load pre-trained HMM from disk (per-ticker, then shared fallback)."""
+        path = self._model_path(self.ticker)
+        # Fallback: load the old shared model if per-ticker doesn't exist yet
+        fallback = "models/saved/regime_model.pkl"
+        load_path = path if os.path.exists(path) else (
+            fallback if os.path.exists(fallback) else None
+        )
+        if load_path is None:
+            logger.info(
+                f"[{self.ticker}] No regime model on disk — using rule-based fallback. "
+                f"Run 'python3 main.py --mode=train --ticker={self.ticker}' to train one."
+            )
             return
         try:
-            data = joblib.load(self.MODEL_PATH)
-            self._model            = data["model"]
-            self._scaler           = data["scaler"]
-            # "state_map" is the key used by RegimeModelTrainer; "mapping" was the old key
-            self._state_to_regime  = data.get("state_map", data.get("mapping", {}))
-            logger.info("Regime model loaded from disk")
+            data = joblib.load(load_path)
+            self._model           = data["model"]
+            self._scaler          = data["scaler"]
+            self._state_to_regime = data.get("state_map", data.get("mapping", {}))
+            src = "per-ticker" if load_path == path else "shared-fallback"
+            logger.info(f"[{self.ticker}] Regime model loaded ({src}): {load_path}")
         except Exception as e:
-            logger.warning(f"Failed to load regime model: {e}")
+            logger.warning(f"[{self.ticker}] Failed to load regime model: {e}")
 
     def _save_regime_snapshot(self, result: Dict) -> None:
         probs = result.get("probs", self._equal_probs())
         conn  = self._connect()
         conn.execute("""
             INSERT INTO regime_snapshots
-            (regime, stability, bull_prob, bear_prob,
+            (ticker, regime, stability, bull_prob, bear_prob,
              high_vol_prob, choppy_prob, detected_at)
-            VALUES (?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?)
         """, (
+            self.ticker,
             result["regime"],
             result["stability"],
             probs.get("BULL_TRENDING",   0),
@@ -549,6 +597,7 @@ class RegimeDetector:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS regime_snapshots (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker        TEXT    DEFAULT 'HDFCBANK.NS',
                 regime        TEXT,
                 stability     REAL,
                 bull_prob     REAL,
@@ -558,9 +607,22 @@ class RegimeDetector:
                 detected_at   TEXT
             )
         """)
+        # Migration: add ticker column to existing tables (idempotent)
+        try:
+            conn.execute(
+                "ALTER TABLE regime_snapshots ADD COLUMN ticker TEXT DEFAULT 'HDFCBANK.NS'"
+            )
+            conn.commit()
+            logger.info("regime_snapshots: added ticker column")
+        except Exception:
+            pass   # column already exists
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_regime_detected
             ON regime_snapshots (detected_at DESC)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_regime_ticker_detected
+            ON regime_snapshots (ticker, detected_at DESC)
         """)
         conn.commit()
         conn.close()
