@@ -48,19 +48,21 @@ class ExitEngine:
         self,
         current_price: float,
         open_price: float = 0.0,
+        ticker: str = None,
     ) -> List[Dict]:
         """
-        Check all open positions for exit conditions.
-        Returns list of exit recommendations.
-        Called every 15 minutes by signal_engine.py.
+        Check open positions for exit conditions.
+        Returns list of exit recommendations (does NOT close in DB — caller
+        must call close_position() / close_position_partial() for each hit).
 
         Args:
-            current_price: Latest market price.
-            open_price:    Today's open price (for gap-fill logic). If nonzero
-                           and the stock gapped past a stop at open, exit at
-                           open_price rather than the theoretical stop level.
+            current_price: Latest market price for this ticker.
+            open_price:    Today's open price (for gap-fill logic).
+            ticker:        When provided, only check positions for this ticker.
+                           CRITICAL: always pass this so HDFCBANK price is never
+                           used to evaluate ICICIBANK positions.
         """
-        positions = self._get_open_positions()
+        positions = self._get_open_positions(ticker=ticker)
         results   = []
 
         for pos in positions:
@@ -443,6 +445,7 @@ class ExitEngine:
         total_shares= int(pos["shares"])
         signal      = pos["signal"]
         signal_uuid = pos.get("signal_uuid") or ""
+        ticker      = pos.get("ticker") or "HDFCBANK.NS"
 
         book_shares  = max(1, int(total_shares * book_pct))
         remain       = max(0, total_shares - book_shares)
@@ -456,11 +459,11 @@ class ExitEngine:
 
         conn.execute("""
             INSERT INTO closed_trades
-            (signal_uuid, signal, entry_price, exit_price, shares,
+            (signal_uuid, ticker, signal, entry_price, exit_price, shares,
              pnl_amount, pnl_pct, exit_reason, close_date, status)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            signal_uuid, signal, entry, exit_price, book_shares,
+            signal_uuid, ticker, signal, entry, exit_price, book_shares,
             pnl_amount, round(pnl_pct, 6),
             f"{reason}_PARTIAL", str(datetime.now()), "CLOSED",
         ))
@@ -483,6 +486,7 @@ class ExitEngine:
             "position_id":   position_id,
             "signal":        signal,
             "signal_uuid":   signal_uuid,
+            "ticker":        ticker,
             "entry":         entry,
             "exit":          exit_price,
             "booked_shares": book_shares,
@@ -506,12 +510,19 @@ class ExitEngine:
         except Exception:
             pass
 
-    def _get_open_positions(self) -> List[Dict]:
+    def _get_open_positions(self, ticker: str = None) -> List[Dict]:
+        """Return open positions, optionally filtered to a single ticker."""
         try:
             conn = self._connect()
-            rows = conn.execute(
-                "SELECT * FROM open_trades WHERE status='OPEN'"
-            ).fetchall()
+            if ticker:
+                rows = conn.execute(
+                    "SELECT * FROM open_trades WHERE status='OPEN' AND ticker=?",
+                    (ticker,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM open_trades WHERE status='OPEN'"
+                ).fetchall()
             conn.close()
             return [dict(r) for r in rows]
         except Exception:

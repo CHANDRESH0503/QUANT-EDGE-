@@ -597,14 +597,22 @@ class SignalEngine:
         )
         return best
 
-    def check_exits(self) -> Dict:
+    def check_exits(self) -> List[Dict]:
         """
-        Check all open positions for exit conditions.
-        Called every 15 minutes alongside run().
-        Returns list of exit recommendations.
+        Check open positions for THIS ticker for stop/target/trail breaches.
+        Returns a list of exit recommendation dicts; does NOT close in the DB —
+        the caller (orchestrator._run_exit_checks) must do that.
+
+        Ticker filter is CRITICAL: without it, HDFCBANK's ₹785 price would be
+        applied to ICICIBANK positions at ₹1400, causing wrong stop/target hits.
         """
+        price = self.feature_builder.price_fetcher.get_current_price()
+        if not price or price <= 0:
+            logger.warning(f"[{self.ticker}] check_exits: invalid price {price}, skipping")
+            return []
         return self.exit_engine.check_all_positions(
-            current_price=self.feature_builder.price_fetcher.get_current_price(),
+            current_price=price,
+            ticker=self.ticker,
         )
 
     def check_model_reversals(self, signal: Dict) -> List[Dict]:

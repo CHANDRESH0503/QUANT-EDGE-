@@ -4,6 +4,14 @@
 
 from datetime import datetime
 from typing import Dict, List
+import pytz as _pytz
+
+_IST = _pytz.timezone("Asia/Kolkata")
+
+
+def _now_ist_str(fmt: str = "%H:%M IST") -> str:
+    """Return the current time as a string in IST, regardless of server timezone."""
+    return datetime.now(_IST).strftime(fmt)
 
 
 class AlertFormatter:
@@ -189,12 +197,15 @@ class AlertFormatter:
         pnl_amt  = float(exit_info.get("pnl_amount", 0)) if "pnl_amount" in exit_info else 0
         reason   = exit_info.get("reason", "")
         message  = exit_info.get("message", "")
+        ticker   = exit_info.get("ticker", "")
         pnl_emoji= "✅" if pnl_pct >= 0 else "❌"
-        now      = datetime.now().strftime("%H:%M IST")
+        now      = _now_ist_str()   # always IST regardless of server timezone
 
+        bank = ticker.replace(".NS", "") if ticker else ""
         return (
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🚪 *EXIT {signal} @ ₹{price:,.2f}*\n"
+            f"🚪 *EXIT {signal} @ ₹{price:,.2f}*"
+            + (f"  [{bank}]" if bank else "") + "\n"
             f"\n"
             f"Reason: {reason}\n"
             f"Detail: {message}\n"

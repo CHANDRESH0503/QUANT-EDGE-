@@ -610,26 +610,57 @@ class MultiBankOrchestrator:
         """
         Check all open positions across every ticker for stop/target/trail breaches.
 
-        Why per-ticker loop instead of a shared ExitEngine call:
-          ExitEngine.check_all_positions(current_price) takes a SINGLE price.
-          With 5 banks we need one live price per bank. Each SignalEngine already
-          owns a PriceFetcher for its ticker, so check_exits() is the right path.
-          It returns List[Dict] of triggered exits; we send a Telegram alert for each.
+        Architecture:
+          Each SignalEngine.check_exits() fetches ITS OWN ticker's current price
+          and filters DB to positions for THAT ticker only (ticker-scoped).
+          This prevents HDFCBANK's ₹785 price from being applied to ICICIBANK
+          positions at ₹1400, which was the root cause of wrong stop/target hits.
+
+          After detecting an exit, we CLOSE the position in the DB immediately
+          before moving to the next engine. This ensures:
+            • The same position is never processed by two different engines.
+            • Positions don't accumulate and spam alerts every 60s.
+
+          _closed_this_cycle is a per-call safeguard against the edge case where
+          two engines both see the same position in the same snapshot.
         """
+        _closed_this_cycle: set = set()
+
         for ticker in self.tickers:
             try:
                 exits = self.engines[ticker].check_exits()
-                if exits:
-                    for exit_info in exits:
-                        try:
-                            self.telegram.send_exit(exit_info)
-                            logger.info(
-                                f"[{ticker}] EXIT fired: "
-                                f"{exit_info.get('reason','?')} "
-                                f"pnl={exit_info.get('pnl_pct', 0):+.2%}"
+                for exit_info in exits:
+                    pos_id = exit_info.get("position_id")
+                    if not pos_id or pos_id in _closed_this_cycle:
+                        continue  # already handled by a previous engine this cycle
+                    _closed_this_cycle.add(pos_id)
+                    try:
+                        # Close position in DB FIRST — prevents repeat alerts
+                        if exit_info.get("partial"):
+                            closed = self.exit_engine.close_position_partial(
+                                pos_id,
+                                exit_info["exit_price"],
+                                exit_info["reason"],
+                                exit_info.get("book_pct", 0.50),
                             )
-                        except Exception as e:
-                            logger.warning(f"[{ticker}] send_exit: {e}")
+                        else:
+                            closed = self.exit_engine.close_position(
+                                pos_id,
+                                exit_info["exit_price"],
+                                exit_info["reason"],
+                            )
+                        # Merge closed info (pnl_amount, hold_days) for Telegram
+                        merged = {**exit_info, **(closed or {})}
+                        self.telegram.send_exit(merged)
+                        logger.info(
+                            f"[{ticker}] EXIT: reason={exit_info.get('reason','?')} "
+                            f"pos={pos_id} price=₹{exit_info.get('exit_price',0):.2f} "
+                            f"pnl={exit_info.get('pnl_pct', 0):+.2%}"
+                        )
+                        # Remove from reversal dedup so it doesn't linger
+                        self._sent_reversals.pop(pos_id, None)
+                    except Exception as e:
+                        logger.warning(f"[{ticker}] close+exit pos={pos_id}: {e}")
             except Exception as e:
                 logger.warning(f"[{ticker}] exit check: {e}")
 
