@@ -1209,6 +1209,167 @@ def _load_last_predictions(ticker_safe: str = "HDFCBANK") -> dict:
     }
 
 
+@app.get("/api/trades")
+async def trades_data() -> JSONResponse:
+    """
+    Paper-trading ledger endpoint — returns open positions + closed trade history.
+    Called by the Portfolio modal when the heat-map card is clicked.
+    """
+    import pytz as _pytz
+    _IST = _pytz.timezone("Asia/Kolkata")
+    now  = datetime.now(_IST)
+
+    # ── Open positions ────────────────────────────────────────────
+    open_rows = db_query("""
+        SELECT id, ticker, signal, trade_type, entry_price,
+               stop_price, target_price, shares, risk_amount,
+               highest_price, lowest_price, opened_at, signal_uuid
+        FROM   open_trades
+        WHERE  status = 'OPEN'
+        ORDER  BY opened_at DESC
+    """)
+
+    # Enrich with current price from batch cache (already populated by /api/live)
+    _sym_map = {t.replace(".NS","").upper(): t for t in _UNIVERSE_SYMS}
+    open_positions = []
+    for r in open_rows:
+        ticker     = r.get("ticker", "HDFCBANK.NS")
+        sym        = ticker if ticker.endswith(".NS") else ticker + ".NS"
+        q          = _quotes_cache.get(sym, {})
+        cur_price  = safe_float(q.get("price", 0)) or safe_float(r.get("entry_price", 0))
+        entry      = safe_float(r.get("entry_price", 0))
+        stop       = safe_float(r.get("stop_price",  0))
+        target     = safe_float(r.get("target_price",0))
+        signal     = r.get("signal", "LONG")
+
+        # Unrealized P&L
+        if entry > 0:
+            unreal_pct = ((cur_price - entry) / entry) if signal == "LONG" else ((entry - cur_price) / entry)
+            unreal_amt = round(unreal_pct * entry * int(r.get("shares", 0) or 0), 2)
+        else:
+            unreal_pct = unreal_amt = 0.0
+
+        # Distance to stop / target in %
+        stop_dist   = round(abs(cur_price - stop)   / cur_price * 100, 2) if cur_price > 0 else 0
+        target_dist = round(abs(target - cur_price) / cur_price * 100, 2) if cur_price > 0 else 0
+
+        # Risk:Reward remaining
+        risk_rem   = abs(cur_price - stop)
+        reward_rem = abs(target - cur_price)
+        rr_rem     = round(reward_rem / risk_rem, 2) if risk_rem > 0 else 0
+
+        # Days held
+        try:
+            opened_dt = datetime.fromisoformat(str(r.get("opened_at",""))[:19])
+            days_held = (now.replace(tzinfo=None) - opened_dt).days
+        except Exception:
+            days_held = 0
+
+        # Progress toward target (0–100%)
+        total_move  = abs(target - entry)
+        done_move   = abs(cur_price - entry)
+        progress    = min(100, round(done_move / total_move * 100)) if total_move > 0 else 0
+
+        open_positions.append({
+            "id":          r.get("id"),
+            "ticker":      ticker.replace(".NS",""),
+            "signal":      signal,
+            "category":    r.get("trade_type", "swing"),
+            "entry":       round(entry, 2),
+            "current":     round(cur_price, 2),
+            "stop":        round(stop, 2),
+            "target":      round(target, 2),
+            "shares":      int(r.get("shares", 0) or 0),
+            "risk_amount": round(safe_float(r.get("risk_amount", 0)), 2),
+            "unreal_pct":  round(unreal_pct * 100, 2),
+            "unreal_amt":  unreal_amt,
+            "stop_dist":   stop_dist,
+            "target_dist": target_dist,
+            "rr_rem":      rr_rem,
+            "days_held":   days_held,
+            "progress":    progress,
+            "opened_at":   str(r.get("opened_at",""))[:16],
+        })
+
+    # ── Closed trades (last 50) ───────────────────────────────────
+    closed_rows = db_query("""
+        SELECT id, ticker, signal, entry_price, exit_price,
+               shares, pnl_amount, pnl_pct, exit_reason,
+               close_date, signal_uuid
+        FROM   closed_trades
+        WHERE  status = 'CLOSED'
+        ORDER  BY close_date DESC
+        LIMIT  50
+    """)
+
+    # Derive trade_type from signal_uuid where possible (format: category-uuid)
+    def _cat_from_uuid(uuid_str: str) -> str:
+        if not uuid_str:
+            return "swing"
+        for cat in ("intraday", "positional", "swing"):
+            if cat in str(uuid_str).lower():
+                return cat
+        return "swing"
+
+    closed_trades = []
+    for r in closed_rows:
+        pnl_pct = safe_float(r.get("pnl_pct", 0))
+        pnl_amt = safe_float(r.get("pnl_amount", 0))
+        entry   = safe_float(r.get("entry_price", 0))
+        exit_p  = safe_float(r.get("exit_price",  0))
+        reason  = r.get("exit_reason", "")
+        uuid    = r.get("signal_uuid","") or ""
+
+        # Friendly reason labels
+        reason_map = {
+            "TARGET_HIT":"🎯 Target Hit", "STOP_LOSS":"🛑 Stop Loss",
+            "TRAILING_STOP":"📉 Trail Stop", "TIME_EXIT":"⏰ Time Exit",
+            "INTRADAY_CLOSE":"🔔 Intraday Close", "GAP_FILL":"⚡ Gap Fill",
+            "TARGET_1R":"🎯 1R Target", "TARGET_2R":"🎯 2R Target",
+            "CHANDELIER_TRAIL":"📉 Chandelier",
+        }
+        reason_label = reason_map.get(reason, reason.replace("_"," ").title())
+
+        closed_trades.append({
+            "id":         r.get("id"),
+            "ticker":     (r.get("ticker") or "HDFCBANK").replace(".NS",""),
+            "signal":     r.get("signal","LONG"),
+            "category":   _cat_from_uuid(uuid),
+            "entry":      round(entry, 2),
+            "exit":       round(exit_p, 2),
+            "shares":     int(r.get("shares", 0) or 0),
+            "pnl_pct":    round(pnl_pct * 100, 2),
+            "pnl_amt":    round(pnl_amt, 2),
+            "reason":     reason_label,
+            "raw_reason": reason,
+            "close_date": str(r.get("close_date",""))[:16],
+        })
+
+    # ── Summary stats ─────────────────────────────────────────────
+    total  = len(closed_trades)
+    wins   = sum(1 for t in closed_trades if t["pnl_pct"] > 0)
+    losses = total - wins
+    gross_profit = sum(t["pnl_amt"] for t in closed_trades if t["pnl_amt"] > 0)
+    gross_loss   = abs(sum(t["pnl_amt"] for t in closed_trades if t["pnl_amt"] < 0))
+    net_pnl      = sum(t["pnl_amt"] for t in closed_trades)
+
+    return JSONResponse(_clean_json({
+        "open":   open_positions,
+        "closed": closed_trades,
+        "summary": {
+            "total":         total,
+            "wins":          wins,
+            "losses":        losses,
+            "win_rate":      round(wins / total * 100, 1) if total > 0 else 0,
+            "net_pnl":       round(net_pnl, 2),
+            "gross_profit":  round(gross_profit, 2),
+            "gross_loss":    round(gross_loss, 2),
+            "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0,
+            "open_count":    len(open_positions),
+        },
+    }))
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "ts": str(datetime.now())}

@@ -3698,5 +3698,435 @@ function updateOrderFlow(d) {
 }
 drawDelta(null);
 </script>
+
+<!-- ════════════════════════════════════════════════════════════════
+     PAPER TRADING LEDGER MODAL
+     Opens when the Portfolio Risk Heat Map card is clicked.
+     ════════════════════════════════════════════════════════════════ -->
+<style>
+/* ── Overlay ── */
+#ptModal {
+  display: none;
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,0.82);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  overflow-y: auto;
+  padding: 24px 16px;
+  animation: ptFadeIn 0.18s ease;
+}
+@keyframes ptFadeIn { from { opacity:0; transform: scale(0.98); } to { opacity:1; transform: scale(1); } }
+
+#ptModal.visible { display: block; }
+
+/* ── Container ── */
+.pt-panel {
+  max-width: 1100px;
+  margin: 0 auto;
+  background: #0f1114;
+  border: 1px solid #1e2330;
+  box-shadow: 0 0 60px rgba(0,230,118,0.08);
+}
+
+/* ── Header ── */
+.pt-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  background: #111318;
+  border-bottom: 1px solid #1e2330;
+}
+.pt-title {
+  font-family: 'Syne', sans-serif;
+  font-weight: 800; font-size: 15px;
+  letter-spacing: 0.2em; color: #00e676;
+}
+.pt-close {
+  background: none; border: 1px solid #252d40; color: #8892a4;
+  padding: 4px 12px; font-family: 'DM Mono',monospace; font-size: 11px;
+  cursor: pointer; letter-spacing: 0.1em;
+}
+.pt-close:hover { border-color: #ff3d57; color: #ff3d57; }
+
+/* ── Summary strip ── */
+.pt-summary {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 1px;
+  background: #1e2330;
+  border-bottom: 1px solid #1e2330;
+}
+.pt-stat {
+  background: #0f1114;
+  padding: 12px 10px;
+  text-align: center;
+}
+.pt-stat .sl { font-size: 8px; color: #4a5568; letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 4px; }
+.pt-stat .sv {
+  font-family: 'Space Mono', monospace; font-size: 16px; font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* ── Tabs ── */
+.pt-tabs {
+  display: flex; gap: 0;
+  border-bottom: 1px solid #1e2330;
+  background: #111318;
+}
+.pt-tab {
+  padding: 10px 20px;
+  font-size: 10px; letter-spacing: 0.15em; font-weight: 700;
+  color: #4a5568; border-bottom: 2px solid transparent;
+  cursor: pointer; user-select: none;
+}
+.pt-tab:hover { color: #8892a4; }
+.pt-tab.active { color: #00e676; border-bottom-color: #00e676; }
+
+/* ── Table ── */
+.pt-body { padding: 16px 20px; }
+
+.pt-table-wrap { overflow-x: auto; }
+.pt-table {
+  width: 100%; border-collapse: collapse;
+  font-family: 'DM Mono', monospace; font-size: 11px;
+}
+.pt-table th {
+  font-size: 8px; letter-spacing: 0.15em; color: #4a5568;
+  text-align: left; padding: 6px 8px; text-transform: uppercase;
+  border-bottom: 1px solid #1e2330; white-space: nowrap;
+}
+.pt-table td {
+  padding: 10px 8px; border-bottom: 1px solid #111318;
+  vertical-align: middle; white-space: nowrap;
+}
+.pt-table tr:hover td { background: #141720; }
+
+/* ── Inline elements ── */
+.cat-badge {
+  font-size: 8px; letter-spacing: 0.12em; padding: 2px 6px;
+  font-weight: 700; text-transform: uppercase; border-radius: 2px;
+}
+.cat-swing      { background: rgba(41,121,255,.18); color: #2979ff; border: 1px solid #2979ff44; }
+.cat-positional { background: rgba(213,0,249,.18);  color: #d500f9; border: 1px solid #d500f944; }
+.cat-intraday   { background: rgba(255,179,0,.18);  color: #ffb300; border: 1px solid #ffb30044; }
+
+.dir-badge {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.1em; padding: 2px 7px;
+}
+.dir-long  { color: #00e676; }
+.dir-short { color: #ff3d57; }
+
+.reason-badge {
+  font-size: 9px; padding: 2px 6px; border-radius: 2px;
+  background: rgba(255,255,255,.05); color: #8892a4;
+}
+.reason-target { background: rgba(0,230,118,.12); color: #00e676; }
+.reason-stop   { background: rgba(255,61,87,.12);  color: #ff3d57; }
+.reason-time   { background: rgba(255,179,0,.12);  color: #ffb300; }
+.reason-trail  { background: rgba(0,229,255,.12);  color: #00e5ff; }
+
+/* ── Progress bar ── */
+.prog-wrap { width: 80px; background: #1e2330; height: 4px; border-radius: 2px; overflow: hidden; display: inline-block; }
+.prog-fill  { height: 100%; border-radius: 2px; }
+
+/* ── Empty state ── */
+.pt-empty { text-align: center; padding: 40px 0; color: #4a5568; font-size: 11px; letter-spacing: 0.1em; }
+
+/* ── Refresh btn ── */
+.pt-refresh {
+  font-size: 10px; letter-spacing: 0.1em; color: #4a5568;
+  background: none; border: 1px solid #1e2330; padding: 3px 10px;
+  cursor: pointer; font-family: 'DM Mono',monospace;
+}
+.pt-refresh:hover { color: #00e676; border-color: #00e676; }
+</style>
+
+<!-- Modal DOM -->
+<div id="ptModal" onclick="ptBackdropClose(event)">
+  <div class="pt-panel" onclick="event.stopPropagation()">
+
+    <!-- Header -->
+    <div class="pt-header">
+      <div>
+        <div class="pt-title">📋 PAPER TRADING LEDGER</div>
+        <div style="font-size:9px;color:#4a5568;letter-spacing:0.1em;margin-top:3px">
+          Live P&amp;L · Open Positions · Trade History
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <button class="pt-refresh" onclick="ptLoad()">↻ REFRESH</button>
+        <div id="ptLastUpdate" style="font-size:9px;color:#4a5568;letter-spacing:0.08em"></div>
+        <button class="pt-close" onclick="ptClose()">✕ CLOSE</button>
+      </div>
+    </div>
+
+    <!-- Summary strip -->
+    <div class="pt-summary" id="ptSummary">
+      <div class="pt-stat"><div class="sl">Open</div><div class="sv" id="ptSumOpen" style="color:#ffb300">—</div></div>
+      <div class="pt-stat"><div class="sl">Total Trades</div><div class="sv" id="ptSumTotal" style="color:#00e5ff">—</div></div>
+      <div class="pt-stat"><div class="sl">Win Rate</div><div class="sv" id="ptSumWR" style="color:#00e676">—</div></div>
+      <div class="pt-stat"><div class="sl">Net P&amp;L</div><div class="sv" id="ptSumNet">—</div></div>
+      <div class="pt-stat"><div class="sl">Gross Profit</div><div class="sv" id="ptSumGP" style="color:#00e676">—</div></div>
+      <div class="pt-stat"><div class="sl">Gross Loss</div><div class="sv" id="ptSumGL" style="color:#ff3d57">—</div></div>
+      <div class="pt-stat"><div class="sl">Profit Factor</div><div class="sv" id="ptSumPF" style="color:#00e676">—</div></div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="pt-tabs">
+      <div class="pt-tab active" id="ptTab0" onclick="ptSwitchTab(0)">OPEN POSITIONS</div>
+      <div class="pt-tab"        id="ptTab1" onclick="ptSwitchTab(1)">TRADE HISTORY</div>
+    </div>
+
+    <!-- Table area -->
+    <div class="pt-body">
+      <div id="ptPane0" class="pt-table-wrap">
+        <div class="pt-empty" id="ptOpenEmpty">Loading…</div>
+        <table class="pt-table" id="ptOpenTable" style="display:none">
+          <thead>
+            <tr>
+              <th>Ticker</th><th>Cat</th><th>Dir</th>
+              <th>Entry ₹</th><th>Current ₹</th>
+              <th>Stop ₹</th><th>Target ₹</th>
+              <th>Shares</th><th>Unreal P&amp;L</th>
+              <th>Stop Dist</th><th>Tgt Dist</th><th>R:R Left</th>
+              <th>Progress</th><th>Days</th><th>Opened</th>
+            </tr>
+          </thead>
+          <tbody id="ptOpenBody"></tbody>
+        </table>
+      </div>
+      <div id="ptPane1" class="pt-table-wrap" style="display:none">
+        <div class="pt-empty" id="ptHistEmpty">Loading…</div>
+        <table class="pt-table" id="ptHistTable" style="display:none">
+          <thead>
+            <tr>
+              <th>Ticker</th><th>Cat</th><th>Dir</th>
+              <th>Entry ₹</th><th>Exit ₹</th>
+              <th>Shares</th>
+              <th>P&amp;L %</th><th>P&amp;L ₹</th>
+              <th>Reason</th><th>Closed</th>
+            </tr>
+          </thead>
+          <tbody id="ptHistBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════════
+// PAPER TRADING LEDGER MODAL
+// ══════════════════════════════════════════════════════════════════
+
+let _ptTab   = 0;
+let _ptTimer = null;
+
+// ── Open / close ──────────────────────────────────────────────────
+function ptOpen() {
+  document.getElementById('ptModal').classList.add('visible');
+  document.body.style.overflow = 'hidden';
+  ptLoad();
+  _ptTimer = setInterval(ptLoad, 30000);   // auto-refresh every 30s while open
+}
+
+function ptClose() {
+  document.getElementById('ptModal').classList.remove('visible');
+  document.body.style.overflow = '';
+  clearInterval(_ptTimer);
+}
+
+function ptBackdropClose(e) {
+  if (e.target === document.getElementById('ptModal')) ptClose();
+}
+
+// Escape key to close
+document.addEventListener('keydown', e => { if (e.key === 'Escape') ptClose(); });
+
+// ── Tab switch ────────────────────────────────────────────────────
+function ptSwitchTab(n) {
+  _ptTab = n;
+  [0, 1].forEach(i => {
+    document.getElementById(`ptTab${i}`).classList.toggle('active', i === n);
+    document.getElementById(`ptPane${i}`).style.display = i === n ? '' : 'none';
+  });
+}
+
+// ── Fetch + render ────────────────────────────────────────────────
+async function ptLoad() {
+  try {
+    const res  = await fetch(buildApiUrl('/api/trades'));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    ptRenderSummary(data.summary || {});
+    ptRenderOpen(data.open   || []);
+    ptRenderHistory(data.closed || []);
+    const el = document.getElementById('ptLastUpdate');
+    if (el) el.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    console.warn('ptLoad failed:', e.message);
+  }
+}
+
+// ── Summary strip ─────────────────────────────────────────────────
+function ptRenderSummary(s) {
+  const setS = (id, text, color) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    if (color) el.style.color = color;
+  };
+  setS('ptSumOpen',  s.open_count ?? '—');
+  setS('ptSumTotal', s.total      ?? '—');
+  setS('ptSumWR',    s.total > 0 ? `${s.win_rate}%` : '—',
+       s.win_rate >= 52 ? '#00e676' : s.win_rate >= 40 ? '#ffb300' : '#ff3d57');
+  const net = s.net_pnl || 0;
+  setS('ptSumNet', `${net >= 0 ? '+' : ''}₹${Math.round(Math.abs(net)).toLocaleString()}`,
+       net >= 0 ? '#00e676' : '#ff3d57');
+  setS('ptSumGP', s.gross_profit > 0 ? `+₹${Math.round(s.gross_profit).toLocaleString()}` : '—');
+  setS('ptSumGL', s.gross_loss   > 0 ? `-₹${Math.round(s.gross_loss).toLocaleString()}`   : '—');
+  const pf = s.profit_factor || 0;
+  setS('ptSumPF', pf > 0 ? pf.toFixed(2) : '—',
+       pf >= 1.5 ? '#00e676' : pf >= 1 ? '#ffb300' : '#ff3d57');
+}
+
+// ── Open positions table ──────────────────────────────────────────
+function ptRenderOpen(rows) {
+  const body    = document.getElementById('ptOpenBody');
+  const table   = document.getElementById('ptOpenTable');
+  const empty   = document.getElementById('ptOpenEmpty');
+  if (!body) return;
+  body.innerHTML = '';
+
+  if (!rows.length) {
+    table.style.display = 'none';
+    empty.textContent   = 'No open positions.';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+  table.style.display = '';
+
+  rows.forEach(p => {
+    const pnlColor = p.unreal_pct >= 0 ? '#00e676' : '#ff3d57';
+    const pnlSign  = p.unreal_pct >= 0 ? '+' : '';
+    const cat      = (p.category || 'swing').toLowerCase();
+    const catClass = `cat-${cat}`;
+    const catLabel = cat === 'positional' ? 'POS' : cat.toUpperCase().slice(0,3);
+
+    // Stop / target color logic
+    const stopColor   = p.stop_dist   < 1 ? '#ff3d57' : p.stop_dist   < 3 ? '#ffb300' : '#8892a4';
+    const targetColor = p.target_dist < 1 ? '#00e676' : p.target_dist < 3 ? '#00e5ff' : '#8892a4';
+
+    // Progress bar — green if positive, red if going backward
+    const progColor = p.unreal_pct >= 0 ? '#00e676' : '#ff3d57';
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><span style="font-family:'Syne',sans-serif;font-weight:700;color:#e8eaf0">${p.ticker}</span></td>
+      <td><span class="cat-badge ${catClass}">${catLabel}</span></td>
+      <td><span class="dir-badge dir-${p.signal.toLowerCase()}">${p.signal === 'LONG' ? '▲ LONG' : '▼ SHORT'}</span></td>
+      <td style="font-family:'Space Mono',monospace">₹${p.entry.toLocaleString('en-IN', {minimumFractionDigits:2})}</td>
+      <td style="font-family:'Space Mono',monospace;color:${pnlColor}">₹${p.current.toLocaleString('en-IN', {minimumFractionDigits:2})}</td>
+      <td style="font-family:'Space Mono',monospace;color:${stopColor}">₹${p.stop.toLocaleString('en-IN', {minimumFractionDigits:2})}</td>
+      <td style="font-family:'Space Mono',monospace;color:${targetColor}">₹${p.target.toLocaleString('en-IN', {minimumFractionDigits:2})}</td>
+      <td style="text-align:right">${p.shares}</td>
+      <td>
+        <div style="font-weight:700;color:${pnlColor};font-family:'Space Mono',monospace">
+          ${pnlSign}${p.unreal_pct.toFixed(2)}%
+        </div>
+        <div style="font-size:9px;color:${pnlColor}66;margin-top:1px">
+          ${p.unreal_amt >= 0 ? '+' : ''}₹${Math.round(p.unreal_amt).toLocaleString()}
+        </div>
+      </td>
+      <td style="color:${stopColor};font-family:'Space Mono',monospace;font-size:10px">${p.stop_dist}%</td>
+      <td style="color:${targetColor};font-family:'Space Mono',monospace;font-size:10px">${p.target_dist}%</td>
+      <td style="font-family:'Space Mono',monospace;font-size:10px;color:${p.rr_rem >= 2 ? '#00e676' : p.rr_rem >= 1 ? '#ffb300' : '#ff3d57'}">${p.rr_rem}×</td>
+      <td>
+        <div class="prog-wrap">
+          <div class="prog-fill" style="width:${Math.max(0, p.progress)}%;background:${progColor}"></div>
+        </div>
+        <div style="font-size:8px;color:#4a5568;margin-top:2px;text-align:center">${p.progress}%</div>
+      </td>
+      <td style="color:#8892a4">${p.days_held}d</td>
+      <td style="font-size:9px;color:#4a5568">${p.opened_at}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+// ── Trade history table ───────────────────────────────────────────
+function ptRenderHistory(rows) {
+  const body  = document.getElementById('ptHistBody');
+  const table = document.getElementById('ptHistTable');
+  const empty = document.getElementById('ptHistEmpty');
+  if (!body) return;
+  body.innerHTML = '';
+
+  if (!rows.length) {
+    table.style.display = 'none';
+    empty.textContent   = 'No closed trades yet.';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+  table.style.display = '';
+
+  rows.forEach(t => {
+    const pnlColor = t.pnl_pct >= 0 ? '#00e676' : '#ff3d57';
+    const pnlSign  = t.pnl_pct >= 0 ? '+' : '';
+    const cat      = (t.category || 'swing').toLowerCase();
+    const catClass = `cat-${cat}`;
+    const catLabel = cat === 'positional' ? 'POS' : cat.toUpperCase().slice(0,3);
+
+    // Reason color
+    const raw = t.raw_reason || '';
+    const reasonClass = raw.includes('TARGET') ? 'reason-target'
+                      : raw.includes('STOP')   ? 'reason-stop'
+                      : raw.includes('TIME') || raw.includes('INTRADAY') ? 'reason-time'
+                      : raw.includes('TRAIL') || raw.includes('CHANDELIER') ? 'reason-trail'
+                      : '';
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><span style="font-family:'Syne',sans-serif;font-weight:700;color:#e8eaf0">${t.ticker}</span></td>
+      <td><span class="cat-badge ${catClass}">${catLabel}</span></td>
+      <td><span class="dir-badge dir-${t.signal.toLowerCase()}">${t.signal === 'LONG' ? '▲ LONG' : '▼ SHORT'}</span></td>
+      <td style="font-family:'Space Mono',monospace">₹${t.entry.toLocaleString('en-IN', {minimumFractionDigits:2})}</td>
+      <td style="font-family:'Space Mono',monospace;color:${pnlColor}">₹${t.exit.toLocaleString('en-IN', {minimumFractionDigits:2})}</td>
+      <td style="text-align:right">${t.shares}</td>
+      <td style="font-weight:700;color:${pnlColor};font-family:'Space Mono',monospace">${pnlSign}${t.pnl_pct.toFixed(2)}%</td>
+      <td style="font-family:'Space Mono',monospace;color:${pnlColor}">${t.pnl_amt >= 0 ? '+' : ''}₹${Math.round(t.pnl_amt).toLocaleString()}</td>
+      <td><span class="reason-badge ${reasonClass}">${t.reason}</span></td>
+      <td style="font-size:9px;color:#4a5568">${t.close_date}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+// ── Wire up click on heat-map card ────────────────────────────────
+(function wireHeatmapClick() {
+  // Find the Portfolio Risk Heat Map card and make it clickable
+  const allCards = document.querySelectorAll('.card');
+  for (const card of allCards) {
+    const label = card.querySelector('.card-label');
+    if (label && label.textContent.includes('RISK HEAT MAP')) {
+      card.style.cursor = 'pointer';
+      card.title        = 'Click to open Paper Trading Ledger';
+      // Add subtle hover glow
+      card.addEventListener('mouseenter', () => {
+        card.style.borderColor = '#00e67644';
+        card.style.boxShadow   = '0 0 16px rgba(0,230,118,0.07)';
+      });
+      card.addEventListener('mouseleave', () => {
+        card.style.borderColor = '';
+        card.style.boxShadow   = '';
+      });
+      card.addEventListener('click', ptOpen);
+      break;
+    }
+  }
+})();
+</script>
 </body>
 </html>
