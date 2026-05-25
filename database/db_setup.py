@@ -84,6 +84,9 @@ class DatabaseSetup:
             ("macro_data",        "effective_date", "TEXT"),
             # earnings_calendar ticker column (added in P2 phase)
             ("earnings_calendar", "ticker", "TEXT DEFAULT 'HDFCBANK.NS'"),
+            # Per-category tracking in closed_trades (added 2026-05-25)
+            # Allows per-category win-rate / PF analysis on historical trades.
+            ("closed_trades", "trade_type", "TEXT DEFAULT 'swing'"),
         ]
         for table, col, coltype in migrations:
             existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -351,7 +354,9 @@ class DatabaseSetup:
             CREATE TABLE IF NOT EXISTS closed_trades (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 signal_uuid  TEXT,
+                ticker       TEXT    DEFAULT 'HDFCBANK.NS',
                 signal       TEXT,
+                trade_type   TEXT    DEFAULT 'swing',
                 entry_price  REAL,
                 exit_price   REAL,
                 shares       INTEGER,

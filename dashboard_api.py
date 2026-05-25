@@ -1332,7 +1332,7 @@ async def trades_data() -> JSONResponse:
 
     # ── Closed trades (last 50) ───────────────────────────────────
     closed_rows = db_query("""
-        SELECT id, ticker, signal, entry_price, exit_price,
+        SELECT id, ticker, signal, trade_type, entry_price, exit_price,
                shares, pnl_amount, pnl_pct, exit_reason,
                close_date, signal_uuid
         FROM   closed_trades
@@ -1341,14 +1341,24 @@ async def trades_data() -> JSONResponse:
         LIMIT  50
     """)
 
-    # Derive trade_type from signal_uuid where possible (format: category-uuid)
-    def _cat_from_uuid(uuid_str: str) -> str:
-        if not uuid_str:
-            return "swing"
-        for cat in ("intraday", "positional", "swing"):
-            if cat in str(uuid_str).lower():
-                return cat
-        return "swing"
+    reason_map = {
+        "TARGET_HIT":      "🎯 Target Hit",
+        "STOP_LOSS":       "🛑 Stop Loss",
+        "TRAILING_STOP":   "📉 Trail Stop",
+        "TIME_EXIT":       "⏰ Time Exit",
+        "INTRADAY_CLOSE":  "🔔 Intraday Close",
+        "GAP_FILL":        "⚡ Gap Fill",
+        "TARGET_1R":       "🎯 1R Target",
+        "TARGET_2R":       "🎯 2R Target",
+        "CHANDELIER_TRAIL":"📉 Chandelier",
+        # Partial suffixes
+        "TARGET_HIT_PARTIAL":      "🎯 Target (Partial)",
+        "STOP_LOSS_PARTIAL":       "🛑 Stop (Partial)",
+        "TRAILING_STOP_PARTIAL":   "📉 Trail (Partial)",
+        "TARGET_1R_PARTIAL":       "🎯 1R (Partial)",
+        "TARGET_2R_PARTIAL":       "🎯 2R (Partial)",
+        "CHANDELIER_TRAIL_PARTIAL":"📉 Chandelier (Partial)",
+    }
 
     closed_trades = []
     for r in closed_rows:
@@ -1356,24 +1366,24 @@ async def trades_data() -> JSONResponse:
         pnl_amt = safe_float(r.get("pnl_amount", 0))
         entry   = safe_float(r.get("entry_price", 0))
         exit_p  = safe_float(r.get("exit_price",  0))
-        reason  = r.get("exit_reason", "")
+        reason  = r.get("exit_reason", "") or ""
+        # trade_type is now a proper DB column; fall back to uuid hint for legacy rows
         uuid    = r.get("signal_uuid","") or ""
+        cat_db  = r.get("trade_type") or ""
+        if not cat_db:
+            for _c in ("intraday", "positional", "swing"):
+                if _c in uuid.lower():
+                    cat_db = _c
+                    break
+            cat_db = cat_db or "swing"
 
-        # Friendly reason labels
-        reason_map = {
-            "TARGET_HIT":"🎯 Target Hit", "STOP_LOSS":"🛑 Stop Loss",
-            "TRAILING_STOP":"📉 Trail Stop", "TIME_EXIT":"⏰ Time Exit",
-            "INTRADAY_CLOSE":"🔔 Intraday Close", "GAP_FILL":"⚡ Gap Fill",
-            "TARGET_1R":"🎯 1R Target", "TARGET_2R":"🎯 2R Target",
-            "CHANDELIER_TRAIL":"📉 Chandelier",
-        }
         reason_label = reason_map.get(reason, reason.replace("_"," ").title())
 
         closed_trades.append({
             "id":         r.get("id"),
             "ticker":     (r.get("ticker") or "HDFCBANK").replace(".NS",""),
             "signal":     r.get("signal","LONG"),
-            "category":   _cat_from_uuid(uuid),
+            "category":   cat_db,
             "entry":      round(entry, 2),
             "exit":       round(exit_p, 2),
             "shares":     int(r.get("shares", 0) or 0),

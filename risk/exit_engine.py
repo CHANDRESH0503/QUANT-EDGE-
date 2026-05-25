@@ -164,50 +164,69 @@ class ExitEngine:
         return pos_id
 
     def close_position(self, position_id: int, exit_price: float, reason: str) -> Dict:
-        """Close a position and move to closed_trades table. Writes signal_outcomes."""
+        """
+        Close a position: INSERT into closed_trades, DELETE from open_trades.
+
+        Both operations are in ONE atomic transaction — either both succeed
+        or neither does.  If the INSERT fails (schema mismatch, locked DB, etc.)
+        the DELETE is also rolled back so the position is never silently lost.
+
+        Returns the closed trade dict, or {} if the position doesn't exist.
+        Raises on unrecoverable DB errors so the caller can log / retry.
+        """
         conn = self._connect()
-        pos  = conn.execute(
-            "SELECT * FROM open_trades WHERE id=?", (position_id,)
-        ).fetchone()
-
-        if not pos:
-            conn.close()
-            return {}
-
-        pos         = dict(pos)
-        entry       = float(pos["entry_price"])
-        shares      = int(pos["shares"])
-        signal      = pos["signal"]
-        signal_uuid = pos.get("signal_uuid") or ""
-        ticker      = pos.get("ticker") or "HDFCBANK.NS"
-        opened_at   = pos.get("opened_at", str(datetime.now()))
-
-        if signal == "LONG":
-            pnl_pct = (exit_price - entry) / entry
-        else:
-            pnl_pct = (entry - exit_price) / entry
-
-        pnl_amount = round(pnl_pct * entry * shares, 2)
-
         try:
-            opened_dt = datetime.strptime(str(opened_at)[:19], "%Y-%m-%d %H:%M:%S")
-            hold_days = (datetime.now() - opened_dt).days
-        except Exception:
-            hold_days = 0
+            pos = conn.execute(
+                "SELECT * FROM open_trades WHERE id=?", (position_id,)
+            ).fetchone()
 
-        conn.execute("""
-            INSERT INTO closed_trades
-            (signal_uuid, ticker, signal, entry_price, exit_price, shares,
-             pnl_amount, pnl_pct, exit_reason, close_date, status)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            signal_uuid, ticker,
-            signal, entry, exit_price, shares,
-            pnl_amount, round(pnl_pct, 6),
-            reason, str(datetime.now()), "CLOSED",
-        ))
-        conn.execute("DELETE FROM open_trades WHERE id=?", (position_id,))
-        conn.commit()
+            if not pos:
+                logger.warning(f"close_position: id={position_id} not found in open_trades")
+                return {}
+
+            pos         = dict(pos)
+            entry       = float(pos["entry_price"])
+            shares      = int(pos["shares"])
+            signal      = pos["signal"]
+            signal_uuid = pos.get("signal_uuid") or ""
+            ticker      = pos.get("ticker")     or "HDFCBANK.NS"
+            trade_type  = pos.get("trade_type") or "swing"
+            opened_at   = pos.get("opened_at",  str(datetime.now()))
+
+            if signal == "LONG":
+                pnl_pct = (exit_price - entry) / entry
+            else:
+                pnl_pct = (entry - exit_price) / entry
+
+            pnl_amount = round(pnl_pct * entry * shares, 2)
+
+            try:
+                opened_dt = datetime.strptime(str(opened_at)[:19], "%Y-%m-%d %H:%M:%S")
+                hold_days = (datetime.now() - opened_dt).days
+            except Exception:
+                hold_days = 0
+
+            # Atomic: INSERT then DELETE in the same connection/transaction
+            conn.execute("""
+                INSERT INTO closed_trades
+                (signal_uuid, ticker, signal, trade_type,
+                 entry_price, exit_price, shares,
+                 pnl_amount, pnl_pct, exit_reason, close_date, status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                signal_uuid, ticker, signal, trade_type,
+                entry, exit_price, shares,
+                pnl_amount, round(pnl_pct, 6),
+                reason, str(datetime.now()), "CLOSED",
+            ))
+            conn.execute("DELETE FROM open_trades WHERE id=?", (position_id,))
+            conn.commit()
+
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise   # let orchestrator._run_exit_checks catch and log it
+
         conn.close()
 
         result = {
@@ -215,6 +234,7 @@ class ExitEngine:
             "signal":      signal,
             "signal_uuid": signal_uuid,
             "ticker":      ticker,
+            "trade_type":  trade_type,
             "entry":       entry,
             "exit":        exit_price,
             "shares":      shares,
@@ -224,13 +244,12 @@ class ExitEngine:
             "reason":      reason,
         }
 
-        # Auto-write outcome for learning loop (task 1.1)
+        # Auto-write outcome for learning loop
         self._record_outcome(result)
 
         logger.info(
-            f"Position closed: id={position_id} | "
-            f"pnl={pnl_pct:+.2%} (₹{pnl_amount:+.2f}) | "
-            f"reason={reason}"
+            f"[{ticker}] Position closed: id={position_id} {trade_type} "
+            f"pnl={pnl_pct:+.2%} (₹{pnl_amount:+.2f}) reason={reason}"
         )
         return result
 
@@ -429,64 +448,79 @@ class ExitEngine:
         book_pct:    float = 0.50,
     ) -> Dict:
         """
-        Book a fraction of the position.
-        Reduces the shares in open_trades; writes partial P&L to closed_trades.
+        Book a fraction of the position (e.g. 50% at 1R, 30% at 2R).
+        Reduces shares in open_trades; writes partial row to closed_trades.
+
+        Atomic: INSERT + UPDATE/DELETE in one transaction.
+        Raises on failure so caller can log without silently losing the trade.
         """
         conn = self._connect()
-        pos  = conn.execute(
-            "SELECT * FROM open_trades WHERE id=?", (position_id,)
-        ).fetchone()
-        if not pos:
+        try:
+            pos = conn.execute(
+                "SELECT * FROM open_trades WHERE id=?", (position_id,)
+            ).fetchone()
+            if not pos:
+                logger.warning(f"close_position_partial: id={position_id} not found")
+                return {}
+
+            pos          = dict(pos)
+            entry        = float(pos["entry_price"])
+            total_shares = int(pos["shares"])
+            signal       = pos["signal"]
+            signal_uuid  = pos.get("signal_uuid") or ""
+            ticker       = pos.get("ticker")      or "HDFCBANK.NS"
+            trade_type   = pos.get("trade_type")  or "swing"
+
+            book_shares = max(1, int(total_shares * book_pct))
+            remain      = max(0, total_shares - book_shares)
+
+            if signal == "LONG":
+                pnl_pct = (exit_price - entry) / entry
+            else:
+                pnl_pct = (entry - exit_price) / entry
+
+            pnl_amount = round(pnl_pct * entry * book_shares, 2)
+
+            conn.execute("""
+                INSERT INTO closed_trades
+                (signal_uuid, ticker, signal, trade_type,
+                 entry_price, exit_price, shares,
+                 pnl_amount, pnl_pct, exit_reason, close_date, status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                signal_uuid, ticker, signal, trade_type,
+                entry, exit_price, book_shares,
+                pnl_amount, round(pnl_pct, 6),
+                f"{reason}_PARTIAL", str(datetime.now()), "CLOSED",
+            ))
+
+            if remain > 0:
+                conn.execute(
+                    "UPDATE open_trades SET shares=? WHERE id=?", (remain, position_id)
+                )
+            else:
+                conn.execute("DELETE FROM open_trades WHERE id=?", (position_id,))
+
+            conn.commit()
+
+        except Exception:
+            conn.rollback()
             conn.close()
-            return {}
+            raise
 
-        pos         = dict(pos)
-        entry       = float(pos["entry_price"])
-        total_shares= int(pos["shares"])
-        signal      = pos["signal"]
-        signal_uuid = pos.get("signal_uuid") or ""
-        ticker      = pos.get("ticker") or "HDFCBANK.NS"
-
-        book_shares  = max(1, int(total_shares * book_pct))
-        remain       = max(0, total_shares - book_shares)
-
-        if signal == "LONG":
-            pnl_pct = (exit_price - entry) / entry
-        else:
-            pnl_pct = (entry - exit_price) / entry
-
-        pnl_amount = round(pnl_pct * entry * book_shares, 2)
-
-        conn.execute("""
-            INSERT INTO closed_trades
-            (signal_uuid, ticker, signal, entry_price, exit_price, shares,
-             pnl_amount, pnl_pct, exit_reason, close_date, status)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            signal_uuid, ticker, signal, entry, exit_price, book_shares,
-            pnl_amount, round(pnl_pct, 6),
-            f"{reason}_PARTIAL", str(datetime.now()), "CLOSED",
-        ))
-
-        if remain > 0:
-            conn.execute(
-                "UPDATE open_trades SET shares=? WHERE id=?", (remain, position_id)
-            )
-        else:
-            conn.execute("DELETE FROM open_trades WHERE id=?", (position_id,))
-
-        conn.commit()
         conn.close()
 
         logger.info(
-            f"Partial exit: id={position_id} | booked {book_shares}/{total_shares} sh | "
-            f"pnl={pnl_pct:+.2%} (₹{pnl_amount:+.2f}) | remain={remain} sh | reason={reason}"
+            f"[{ticker}] Partial exit: id={position_id} {trade_type} "
+            f"booked {book_shares}/{total_shares} sh | "
+            f"pnl={pnl_pct:+.2%} (₹{pnl_amount:+.2f}) | remain={remain} | reason={reason}"
         )
         return {
             "position_id":   position_id,
             "signal":        signal,
             "signal_uuid":   signal_uuid,
             "ticker":        ticker,
+            "trade_type":    trade_type,
             "entry":         entry,
             "exit":          exit_price,
             "booked_shares": book_shares,
@@ -531,31 +565,52 @@ class ExitEngine:
     def _connect(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.db_path)
         c.row_factory = sqlite3.Row
+        # WAL gives concurrent reads during writes; foreign_keys enforces integrity
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA synchronous=NORMAL")
         c.execute("PRAGMA foreign_keys=ON")
         return c
 
     def _setup_db(self) -> None:
+        """
+        Idempotent schema bootstrap.
+
+        This is the AUTHORITATIVE schema for trading tables.
+        Kept in sync with database/db_setup.py._trading_tables().
+        All columns that open_position() / close_position() write must
+        exist here so the tables are always ready even if DatabaseSetup
+        hasn't run yet (e.g. unit tests, direct ExitEngine instantiation).
+
+        NEVER remove columns — add them here AND in _migrate_columns()
+        of DatabaseSetup so existing DBs get the column via ALTER TABLE.
+        """
         conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS open_trades (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                signal        TEXT,
-                entry_price   REAL,
-                stop_price    REAL,
-                target_price  REAL,
-                shares        INTEGER,
-                risk_amount   REAL,
-                trade_type    TEXT DEFAULT 'swing',
-                highest_price REAL,
-                lowest_price  REAL,
-                status        TEXT DEFAULT 'OPEN',
-                opened_at     TEXT
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_uuid    TEXT,
+                ticker         TEXT    DEFAULT 'HDFCBANK.NS',
+                signal         TEXT,
+                entry_price    REAL,
+                stop_price     REAL,
+                target_price   REAL,
+                shares         INTEGER,
+                risk_amount    REAL,
+                trade_type     TEXT    DEFAULT 'swing',
+                highest_price  REAL,
+                lowest_price   REAL,
+                status         TEXT    DEFAULT 'OPEN',
+                opened_at      TEXT
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS closed_trades (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_uuid  TEXT,
+                ticker       TEXT    DEFAULT 'HDFCBANK.NS',
                 signal       TEXT,
+                trade_type   TEXT    DEFAULT 'swing',
                 entry_price  REAL,
                 exit_price   REAL,
                 shares       INTEGER,
@@ -563,8 +618,20 @@ class ExitEngine:
                 pnl_pct      REAL,
                 exit_reason  TEXT,
                 close_date   TEXT,
-                status       TEXT DEFAULT 'CLOSED'
+                status       TEXT    DEFAULT 'CLOSED'
             )
         """)
+        # Idempotent migration: add any column that existing DBs might be missing
+        _migrations = [
+            ("open_trades",   "signal_uuid",  "TEXT"),
+            ("open_trades",   "ticker",       "TEXT DEFAULT 'HDFCBANK.NS'"),
+            ("closed_trades", "signal_uuid",  "TEXT"),
+            ("closed_trades", "ticker",       "TEXT DEFAULT 'HDFCBANK.NS'"),
+            ("closed_trades", "trade_type",   "TEXT DEFAULT 'swing'"),
+        ]
+        for table, col, coltype in _migrations:
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if col not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
         conn.commit()
         conn.close()
