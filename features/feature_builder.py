@@ -562,12 +562,23 @@ class FeatureBuilder:
         # Override regime_* features in raw_features with rule-based classification
         # so the ML model sees the same definition as was used during training.
         # Gate 1 still uses the HMM-based regime_result dict (not raw_features).
+        #
+        # FIX (2026-05-25): Added EMA-override path to match regime_detector.py Gate 1 logic.
+        # Problem: Gate 1 uses an EMA spread override (|spread|>1.5%) for stocks with low ADX
+        # that are in early trend recovery (e.g. INDUSINDBK after 2yr crash — ADX=20, but
+        # EMA20>EMA50 by 1.7%). Without this fix, regime_bull=0 (choppy) feeds the ML model
+        # → SHORT at 69.7% confidence (above 65% Gate 6 threshold). With the fix, regime_bull=1
+        # → SHORT only at 56.4% confidence (below threshold → correctly blocked).
         _adx    = float(raw.get("adx",        0))
         _esp    = float(raw.get("ema_spread",  0))
         _r20    = float(raw.get("returns_20d", 0))
         _r5     = float(raw.get("returns_5d",  0))
-        _rule_bear = int(_adx > 22 and _esp < -0.01 and _r20 < 0)
-        _rule_bull = int(_adx > 22 and _esp >  0.01 and _r20 > 0)
+        # EMA override mirrors regime_detector.py: if |EMA spread| > 1.5% AND returns confirm,
+        # classify as trending even when ADX hasn't crossed 22 yet (early trend recovery).
+        _ema_bull_override = (_esp >  0.015 and _r20 > 0)
+        _ema_bear_override = (_esp < -0.015 and _r20 < 0)
+        _rule_bear = int((_adx > 22 and _esp < -0.01 and _r20 < 0) or _ema_bear_override)
+        _rule_bull = int((_adx > 22 and _esp >  0.01 and _r20 > 0) or _ema_bull_override)
         _rule_hvol = int(_adx > 30 and abs(_r5) > 0.025)
         _rule_chop = int(not _rule_bear and not _rule_bull and not _rule_hvol)
         raw["regime_bear"]      = _rule_bear
