@@ -1229,6 +1229,44 @@ async def trades_data() -> JSONResponse:
         ORDER  BY opened_at DESC
     """)
 
+    # ── Signal-log fallback (mirrors /api/live logic exactly) ─────
+    # When open_trades DB is empty (e.g. VPS not yet updated, or signals
+    # fired via --mode=signal without the orchestrator opening positions),
+    # fall back to signal_log.csv so the modal shows the same count as
+    # the Portfolio Heat Map card.  Without this fallback the heat map
+    # says "3 open trades" but the modal shows 0 — a confusing mismatch.
+    if not open_rows:
+        try:
+            import csv as _csv
+            _last_per_key: dict = {}
+            with open("logs/signal_log.csv") as _f:
+                for _r in _csv.DictReader(_f):
+                    _key = (_r.get("ticker", ""), _r.get("category", ""))
+                    _last_per_key[_key] = _r
+            for _v in _last_per_key.values():
+                if (_v.get("status") == "SIGNAL"
+                        and float(_v.get("shares", 0) or 0) > 0
+                        and float(_v.get("stop",   0) or 0) > 0):
+                    _ep = float(_v.get("entry", 0) or 0)
+                    open_rows.append({
+                        "id":           None,           # no DB id — log-derived
+                        "ticker":       _v.get("ticker", "HDFCBANK.NS"),
+                        "signal":       _v.get("signal", "LONG"),
+                        "trade_type":   _v.get("category", "swing"),
+                        "entry_price":  _ep,
+                        "stop_price":   float(_v.get("stop",   0) or 0),
+                        "target_price": float(_v.get("target", 0) or 0),
+                        "shares":       int(float(_v.get("shares", 0) or 0)),
+                        "risk_amount":  float(_v.get("risk_amount", 0) or 0),
+                        "highest_price":_ep,
+                        "lowest_price": _ep,
+                        "opened_at":    _v.get("timestamp", ""),
+                        "signal_uuid":  _v.get("signal_uuid", ""),
+                        "_from_log":    True,   # flag for UI labelling
+                    })
+        except Exception:
+            pass
+
     # Enrich with current price from batch cache (already populated by /api/live)
     _sym_map = {t.replace(".NS","").upper(): t for t in _UNIVERSE_SYMS}
     open_positions = []
@@ -1289,6 +1327,7 @@ async def trades_data() -> JSONResponse:
             "days_held":   days_held,
             "progress":    progress,
             "opened_at":   str(r.get("opened_at",""))[:16],
+            "from_log":    bool(r.get("_from_log")),   # True = signal-log derived, no DB row
         })
 
     # ── Closed trades (last 50) ───────────────────────────────────
