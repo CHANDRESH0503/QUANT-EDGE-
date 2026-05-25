@@ -7,6 +7,8 @@ import feedparser
 import sqlite3
 import logging
 import re
+import urllib.request
+import urllib.error
 
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -22,6 +24,52 @@ MAX_ARTICLE_AGE_DAYS = 7
 # sorts them by date (newest first). Empirically returns ~100 entries vs the
 # relevance-sorted default which mixes in articles from years ago.
 GOOGLE_NEWS_RECENCY_WINDOW = "7d"
+
+# ── HTTP headers used for every feed request ──────────────────────────────────
+# VPS / cloud IPs are blocked by Google News and most Indian news sites if no
+# User-Agent is sent (feedparser's default UA is "feedparser/<version>", which
+# is immediately identified as a bot and rejected).  A realistic Chrome UA
+# passes most site-side filters.
+_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+_REQUEST_HEADERS = {
+    "User-Agent":      _BROWSER_UA,
+    "Accept":          "application/rss+xml, application/xml, text/xml, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "Referer":         "https://www.google.com/",
+    "Cache-Control":   "no-cache",
+}
+_FETCH_TIMEOUT = 20   # seconds per feed request
+
+
+def _fetch_feed_bytes(url: str) -> Optional[bytes]:
+    """Download a feed URL with a browser-like UA.
+
+    Returns raw bytes on success, None on network/HTTP error.
+    Logs the HTTP status and entry-level detail so VPS debugging is easy.
+    """
+    try:
+        req = urllib.request.Request(url, headers=_REQUEST_HEADERS)
+        with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as resp:
+            status = getattr(resp, "status", "?")
+            data   = resp.read()
+            logger.debug(
+                f"_fetch_feed_bytes: status={status} bytes={len(data)} url={url[:80]}"
+            )
+            return data
+    except urllib.error.HTTPError as e:
+        logger.warning(f"HTTP {e.code} fetching feed: {url[:80]}")
+        return None
+    except urllib.error.URLError as e:
+        logger.warning(f"URL error fetching feed ({e.reason}): {url[:80]}")
+        return None
+    except Exception as e:
+        logger.warning(f"Unexpected error fetching feed ({e}): {url[:80]}")
+        return None
 
 
 # ── Per-bank news configuration ───────────────────────────────────────────────
@@ -82,14 +130,20 @@ BANK_NEWS_CONFIG: Dict[str, Dict] = {
     },
 }
 
-# Generic feeds shared across all banks — articles tagged by keyword matching
-# Verified working 2026-05-23: Google News ✓, Moneycontrol ✓, LiveMint ✓, CNBCTV18 ✓
-# ET topic feeds: 0 entries (broken). Business Standard: 403 (blocked). Both removed.
+# Generic feeds shared across all banks — articles tagged by keyword matching.
+# All fetched with browser UA so VPS IPs are not blocked.
+# ET topic feeds: previously returned 0 entries without UA; re-enabled with UA fix.
+# Business Standard: 403 even with UA — remains removed.
 _SHARED_FEEDS = {
     "moneycontrol": "https://www.moneycontrol.com/rss/marketreports.xml",
     "livemint":     "https://www.livemint.com/rss/markets",
     "cnbctv18":     "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml",
 }
+
+# ET banking RSS — per-bank, fetched in addition to google_news.
+# Works from VPS when browser UA is sent.  Used as primary on VPS when Google
+# News is blocked (DigitalOcean/Railway IPs are in Google's datacenter blocklist).
+_ET_BANKING_RSS = "https://economictimes.indiatimes.com/industry/banking/finance/banking/rssfeeds/7202578.cms"
 
 HIGH_IMPORTANCE_KEYWORDS = [
     "quarterly results", "q1 results", "q2 results", "q3 results", "q4 results",
@@ -299,17 +353,30 @@ class NewsFetcher:
 
     def _build_feeds(self, cfg: Dict) -> Dict[str, str]:
         """Build the RSS feed dict for this bank.
-        Google News (100 entries, date-sorted via when:Nd) + 3 shared feeds.
-        ET removed (0 entries). BS removed (403)."""
-        # `when:Nd` restricts Google News to the last N days AND sorts by date.
-        # Without it, results come back by relevance and include articles from
-        # 2018-2025 mixed with current news.
+
+        Priority (in fetch order):
+          1. google_news   — 100 date-sorted entries; blocked on some VPS IPs
+          2. et_bank       — ET per-bank topic RSS; VPS-friendly with browser UA
+          3. et_banking    — ET banking sector RSS (shared); extra coverage
+          4. moneycontrol  — shared; VPS-friendly with browser UA
+          5. livemint      — shared; VPS-friendly with browser UA
+          6. cnbctv18      — shared; VPS-friendly with browser UA
+
+        Google News result count logged — if 0 entries on VPS the ET feeds
+        supply all the news instead.
+        """
         feeds = {
+            # Google News: date-restricted via when:Nd, sorted newest first.
+            # May return 0 entries from datacenter IPs (DigitalOcean blocklist).
             "google_news": (
                 f"https://news.google.com/rss/search"
                 f"?q={cfg['google_query']}+when:{GOOGLE_NEWS_RECENCY_WINDOW}"
                 f"&hl=en-IN&gl=IN&ceid=IN:en"
             ),
+            # ET per-bank topic RSS — reliable from VPS with browser UA.
+            "et_topic": cfg["et_feed"],
+            # ET banking sector (shared across all banks, keyword-filtered).
+            "et_banking": _ET_BANKING_RSS,
         }
         feeds.update(_SHARED_FEEDS)
         return feeds
@@ -338,8 +405,33 @@ class NewsFetcher:
             return None
 
     def _fetch_feed(self, source_name: str, feed_url: str) -> int:
-        """Parse one RSS feed and save relevant + recent articles for this bank."""
-        feed      = feedparser.parse(feed_url)
+        """Parse one RSS feed and save relevant + recent articles for this bank.
+
+        Fetches with a browser-like User-Agent so VPS IPs are not blocked by
+        Google News / Moneycontrol / LiveMint.  Falls back to bare feedparser
+        (which uses its own UA) only if the browser-UA fetch fails entirely.
+        """
+        raw = _fetch_feed_bytes(feed_url)
+        if raw is not None:
+            feed = feedparser.parse(raw)
+        else:
+            # Network error — fall back; feedparser will try directly and log
+            logger.info(f"[{self.ticker}][{source_name}] browser fetch failed, trying feedparser direct")
+            feed = feedparser.parse(feed_url)
+
+        n_entries = len(feed.entries)
+        http_status = getattr(feed, "status", "local")
+        if n_entries == 0:
+            logger.warning(
+                f"[{self.ticker}][{source_name}] 0 entries "
+                f"(HTTP {http_status}, bozo={feed.bozo})"
+                + (f" bozo_exc={feed.bozo_exception}" if feed.bozo else "")
+            )
+        else:
+            logger.debug(
+                f"[{self.ticker}][{source_name}] {n_entries} entries (HTTP {http_status})"
+            )
+
         conn      = self._connect()
         keywords  = BANK_NEWS_CONFIG[self.ticker]["keywords"]
         new_count = 0

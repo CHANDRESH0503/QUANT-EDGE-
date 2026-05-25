@@ -5,9 +5,6 @@
 *.env
 secrets.py
 
-# Database — contains real trade data
-database/trading.db
-database/*.db
 
 # Model artifacts — too large for git
 models/saved/*.pkl
