@@ -3,6 +3,14 @@
 # Run: uvicorn dashboard_api:app --host 0.0.0.0 --port 8000 --reload
 # Dashboard fetches from: http://localhost:8000/api/live?ticker=HDFCBANK.NS
 
+# ── Prevent loky/multiprocessing semaphore leak on Python 3.14 / macOS ───────
+# Must be set BEFORE any transformers / tokenizers import.
+import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+# ─────────────────────────────────────────────────────────────────────────────
+
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse

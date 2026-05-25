@@ -12,6 +12,12 @@ from typing import Dict, List, Tuple, Optional
 logger = logging.getLogger(__name__)
 
 try:
+    # Prevent loky/multiprocessing semaphore leak on Python 3.14 / macOS.
+    # Must be set before importing tokenizers (pulled in by transformers).
+    import os as _os
+    _os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    _os.environ.setdefault("OMP_NUM_THREADS", "1")
+    _os.environ.setdefault("MKL_NUM_THREADS", "1")
     from transformers import pipeline, Pipeline
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
@@ -412,6 +418,14 @@ class FinBERTSentiment:
 
         try:
             logger.info("Loading FinBERT model (first load may take 30s)...")
+            # Pin torch to 1 intra-op thread so it never spawns loky workers
+            # that leak semaphores on Python 3.14 / macOS at shutdown.
+            try:
+                import torch
+                torch.set_num_threads(1)
+                torch.set_num_interop_threads(1)
+            except Exception:
+                pass
             FinBERTSentiment._shared_pipeline = pipeline(
                 "sentiment-analysis",
                 model=self.MODEL_NAME,

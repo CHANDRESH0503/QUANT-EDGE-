@@ -36,6 +36,12 @@
 import argparse
 import logging
 import os
+
+# Prevent loky/multiprocessing semaphore leak on Python 3.14 / macOS.
+# Must be set before any transformers / tokenizers import.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 import signal as _signal
 import sys
 import time
