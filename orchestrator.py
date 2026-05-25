@@ -170,8 +170,11 @@ class MultiBankOrchestrator:
         self._last_signal_by_cat: Dict[str, Dict[str, tuple]] = {
             t: {} for t in tickers
         }
-        # Reversal alerts: { position_id: reversal_type } — cleared when position closes
-        self._sent_reversals: Dict[int, str] = {}
+        # Reversal alerts: { (ticker, category, reversal_type) → True }
+        # Using a compound tuple key (NOT position_id) so dedup survives
+        # across position close→reopen cycles for the same ticker+category.
+        # Cleared only when the position for that ticker actually closes.
+        self._sent_reversals: Dict[tuple, bool] = {}
         # Last pipeline output per ticker (for market-open alert)
         self._last_signal_per_ticker: Dict[str, Dict] = {}
 
@@ -415,7 +418,7 @@ class MultiBankOrchestrator:
                 if signal:
                     self._last_signal_per_ticker[ticker] = signal
                     self._dispatch_alerts(ticker, signal, categories)
-                    self._dispatch_reversal_alerts(ticker, signal)
+                    self._dispatch_reversal_alerts(ticker, signal, categories)
                     self._open_paper_trades(ticker, signal, categories)
             except Exception as e:
                 logger.error(f"[{ticker}] pipeline error: {e}\n{traceback.format_exc()}")
@@ -571,11 +574,33 @@ class MultiBankOrchestrator:
             except Exception as e:
                 logger.warning(f"[{ticker}] send_signal ({category}): {e}")
 
-    def _dispatch_reversal_alerts(self, ticker: str, signal: Dict) -> None:
+    def _dispatch_reversal_alerts(
+        self,
+        ticker:     str,
+        signal:     Dict,
+        categories: Optional[List[str]] = None,
+    ) -> None:
         """
         Advisory alert when an open position's model direction reverses or the
         regime turns adverse. One alert per reversal event; suppressed until the
-        position closes or the model flips back.
+        position for that ticker+category closes.
+
+        Dedup key: (ticker, category, reversal_type) tuple — NOT position_id.
+
+        Why NOT position_id:
+          When a paper position closes and immediately re-opens in the same cycle
+          (e.g. AXIS POSITIONAL), the new position gets a fresh DB id, bypassing
+          any dedup keyed by the old id and re-firing the same alert every 5 min.
+          A compound key survives position ID churn: once (AXISBANK.NS, positional,
+          REGIME_CHANGE) is recorded, it won't fire again until that ticker's
+          position actually closes — at which point _run_exit_checks clears all
+          keys for that ticker.
+
+        Category scoping:
+          During 5-min intraday-only cycles (categories=["intraday"]), we skip
+          POSITIONAL and SWING reversal checks. Those categories are evaluated on
+          the next 15-min full cycle, preventing false alerts for long-duration
+          trades during short cycles.
         """
         try:
             reversals = self.engines[ticker].check_model_reversals(signal)
@@ -583,20 +608,21 @@ class MultiBankOrchestrator:
             logger.warning(f"[{ticker}] check_model_reversals: {e}")
             return
 
-        # Prune dedup entries for positions that have since closed
-        active_ids = {r["position_id"] for r in reversals if r.get("position_id")}
-        for stale_id in [k for k in self._sent_reversals if k not in active_ids]:
-            del self._sent_reversals[stale_id]
-
         for rev in reversals:
-            pos_id = rev.get("position_id")
-            rtype  = rev.get("type")
-            if self._sent_reversals.get(pos_id) == rtype:
-                continue    # already alerted for this event
-            self._sent_reversals[pos_id] = rtype
+            cat   = rev.get("category", "")
+            rtype = rev.get("type", "")
+
+            # Skip categories not in scope for this cycle
+            if categories and cat not in categories:
+                continue
+
+            key = (ticker, cat, rtype)
+            if key in self._sent_reversals:
+                continue    # already alerted — suppressed until position closes
+
+            self._sent_reversals[key] = True
             logger.warning(
-                f"[{ticker}] reversal: pos={pos_id} {rtype} "
-                f"cat={rev.get('category')} "
+                f"[{ticker}] reversal: {rtype} cat={cat} "
                 f"{rev.get('open_signal')} → {rev.get('model_signal')}"
             )
             try:
@@ -657,8 +683,11 @@ class MultiBankOrchestrator:
                             f"pos={pos_id} price=₹{exit_info.get('exit_price',0):.2f} "
                             f"pnl={exit_info.get('pnl_pct', 0):+.2%}"
                         )
-                        # Remove from reversal dedup so it doesn't linger
-                        self._sent_reversals.pop(pos_id, None)
+                        # Clear ALL reversal-dedup entries for this ticker.
+                        # Using tuple key (ticker, cat, rtype) so we can cleanly
+                        # purge by ticker without needing the old position_id.
+                        for _key in [k for k in self._sent_reversals if k[0] == ticker]:
+                            del self._sent_reversals[_key]
                     except Exception as e:
                         logger.warning(f"[{ticker}] close+exit pos={pos_id}: {e}")
             except Exception as e:
