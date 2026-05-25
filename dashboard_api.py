@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 import sqlite3
 import logging
 import json
+import math
 import os
 import time
 import threading
@@ -271,6 +272,34 @@ def safe_float(v, default=0.0) -> float:
         return f if (f == f and abs(f) < 1e15) else default
     except (TypeError, ValueError):
         return default
+
+
+def _clean_json(obj):
+    """
+    Recursively walk the response tree and sanitize values that would make
+    json.dumps() raise ``ValueError: Out of range float values are not JSON
+    compliant``.  Specifically:
+      - float nan / inf / -inf  → 0.0
+      - numpy scalar types      → native Python int / float (then re-checked)
+      - everything else         → unchanged
+    Applied to the full response dict before JSONResponse() so a single NaN
+    anywhere in a nested calculation cannot bring down the entire endpoint.
+    """
+    if isinstance(obj, dict):
+        return {k: _clean_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean_json(v) for v in obj]
+    # numpy scalars — convert first, then fall through to float/int check
+    if isinstance(obj, (np.floating, np.integer, np.bool_)):
+        obj = obj.item()          # → Python float / int / bool
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return 0.0
+        return obj
+    if isinstance(obj, int):
+        # guard against Python 2 compat (irrelevant here, but be safe)
+        return obj
+    return obj
 
 
 def _build_quote(price: float, prev: float, high: float, low_: float,
@@ -900,7 +929,7 @@ async def live_data(
     # Kick off a background news fetch if news is stale — non-blocking
     _trigger_news_fetch_bg()
 
-    return JSONResponse({
+    return JSONResponse(_clean_json({
         "ts":            now.strftime("%H:%M:%S"),
         "date":          now.strftime("%a %d %b %Y"),
         "ist":           now.strftime("%d %b %Y %H:%M IST"),
@@ -1127,7 +1156,7 @@ async def live_data(
 
         # ── Order flow (computed from chart candles) ─────────────
         "order_flow": order_flow,
-    })
+    }))
 
 
 def _load_last_gate_results(ticker_safe: str = "HDFCBANK") -> dict:
