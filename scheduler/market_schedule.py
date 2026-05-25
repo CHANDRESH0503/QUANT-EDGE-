@@ -114,14 +114,19 @@ class MarketSchedule:
         return d
 
     def is_sunday_midnight(self) -> bool:
-        """Sunday midnight window for weekly retrain (00:00–00:30)."""
+        """Sunday midnight window for weekly retrain (00:00–02:00 IST).
+
+        2-hour window (was 30 min) so a VPS restart or delayed boot up to
+        2 hours past midnight still triggers the retrain. The _retrain_done
+        flag in the orchestrator prevents it from firing more than once.
+        """
         now = self.now_ist()
-        return now.weekday() == 6 and now.hour == 0 and now.minute < 30
+        return now.weekday() == 6 and now.hour < 2   # 00:00–01:59 IST
 
     def is_sunday_morning(self) -> bool:
-        """Sunday 6 AM — weekly data refresh."""
+        """Sunday 6 AM — weekly data refresh (06:00–07:00 IST)."""
         now = self.now_ist()
-        return now.weekday() == 6 and now.hour == 6 and now.minute < 30
+        return now.weekday() == 6 and now.hour == 6
 
     def is_end_of_day(self) -> bool:
         """3:45–4:00 PM — post-market summary window."""

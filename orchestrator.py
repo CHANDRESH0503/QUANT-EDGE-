@@ -338,7 +338,7 @@ class MultiBankOrchestrator:
 
         # ── Exit monitor — every 60s during market hours ──────────────────────
         if is_open and (now - self._last_exit_ts) >= EXIT_INTERVAL:
-            self._safe("exits", self.exit_engine.check_all_open_trades)
+            self._run_exit_checks()
             self._last_exit_ts = now
 
         # ── Circuit breaker — every tick on trading days ──────────────────────
@@ -376,7 +376,7 @@ class MultiBankOrchestrator:
 
         # ── 15:15–15:30 — Intraday close warning ──────────────────────────────
         if self.schedule.is_intraday_close_window():
-            self._safe("intraday_close_exits", self.exit_engine.check_all_open_trades)
+            self._run_exit_checks()
             if not self._intraday_close_sent and now_dt.minute >= 15:
                 self._safe_telegram(
                     self.telegram.send_intraday_close_warning,
@@ -606,6 +606,33 @@ class MultiBankOrchestrator:
             except Exception as e:
                 logger.warning(f"[{ticker}] reversal telegram: {e}")
 
+    def _run_exit_checks(self) -> None:
+        """
+        Check all open positions across every ticker for stop/target/trail breaches.
+
+        Why per-ticker loop instead of a shared ExitEngine call:
+          ExitEngine.check_all_positions(current_price) takes a SINGLE price.
+          With 5 banks we need one live price per bank. Each SignalEngine already
+          owns a PriceFetcher for its ticker, so check_exits() is the right path.
+          It returns List[Dict] of triggered exits; we send a Telegram alert for each.
+        """
+        for ticker in self.tickers:
+            try:
+                exits = self.engines[ticker].check_exits()
+                if exits:
+                    for exit_info in exits:
+                        try:
+                            self.telegram.send_exit(exit_info)
+                            logger.info(
+                                f"[{ticker}] EXIT fired: "
+                                f"{exit_info.get('reason','?')} "
+                                f"pnl={exit_info.get('pnl_pct', 0):+.2%}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"[{ticker}] send_exit: {e}")
+            except Exception as e:
+                logger.warning(f"[{ticker}] exit check: {e}")
+
     def _send_market_open_alerts(self) -> None:
         """09:15 — send market-open confirmation for each bank that has a live signal."""
         for ticker in self.tickers:
@@ -622,37 +649,45 @@ class MultiBankOrchestrator:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _tick_data_tasks(self, now: float, is_trading: bool, is_open: bool) -> None:
-        """Check and run each data fetcher if its interval has elapsed."""
+        """Check and run each data fetcher if its interval has elapsed.
 
-        # News + FinBERT — every 15 min on trading days
-        if is_trading and (now - self._last_news_ts) >= NEWS_INTERVAL:
+        Weekend gating rationale:
+          News / social  — financial news and social posts happen 24/7; fetch always.
+          Options chain  — meaningful only when NSE is open; gated on is_open.
+          BSE / FII/DII  — NSE publishes only on trading days; gated on is_trading.
+          Global macro   — always (S&P, VIX, DXY don't take weekends off).
+        """
+
+        # News + FinBERT — every 15 min, 24/7 (news publishes on weekends too)
+        # NewsFetcher.fetch_all() has its own 900s internal guard so this is safe.
+        if (now - self._last_news_ts) >= NEWS_INTERVAL:
             self._safe("news", self._fetch_news_and_score)
             self._last_news_ts = now
 
-        # Options chain — every 30 min during market hours
+        # Options chain — every 30 min during market hours only
         if is_open and (now - self._last_options_ts) >= OPTIONS_INTERVAL:
             self._safe("options", self.options_fetcher.fetch_and_calculate)
             self._last_options_ts = now
 
-        # BSE announcements — every 30 min on trading days
+        # BSE announcements — every 30 min on trading days (NSE only publishes weekdays)
         if is_trading and (now - self._last_bse_ts) >= BSE_INTERVAL:
             self._safe("bse", self._run_bse_pipeline)
             self._last_bse_ts = now
 
-        # FII/DII — every 2 hr on trading days
+        # FII/DII — every 2 hr on trading days (NSE API only has weekday data)
         if is_trading and (now - self._last_fii_ts) >= FII_INTERVAL:
             self._safe("fii",      self.fii_fetcher.fetch_fii_dii_data)
             self._safe("fii_bulk", self.fii_fetcher.fetch_bulk_deals)
             self._last_fii_ts = now
 
-        # Social sentiment — every 2 hr on trading days
-        if is_trading and (now - self._last_social_ts) >= SOCIAL_INTERVAL:
+        # Social sentiment — every 2 hr, 24/7 (Reddit/Twitter post on weekends)
+        if (now - self._last_social_ts) >= SOCIAL_INTERVAL:
             self._safe("social", self.social_fetcher.fetch_all)
             self._last_social_ts = now
 
-        # Global macro — every 1 hr always (needed for Gate 2: VIX, DXY, S&P)
+        # Global macro — every 1 hr always (S&P/VIX/DXY needed for Gate 2)
         if (now - self._last_global_ts) >= GLOBAL_INTERVAL:
-            self._safe("global", self.global_fetcher.fetch_all)
+            self._safe("global", self.global_fetcher.fetch_overnight_signals)
             self._last_global_ts = now
 
     def _fetch_news_and_score(self) -> None:
@@ -746,7 +781,7 @@ class MultiBankOrchestrator:
     def _run_eod_summary(self) -> None:
         """15:45 IST — final exit check + portfolio heatmap via Telegram."""
         logger.info("── EOD Summary ──────────────────────────────────────────")
-        self._safe("eod_exits", self.exit_engine.check_all_open_trades)
+        self._run_exit_checks()
         try:
             from dashboard.portfolio_heatmap import PortfolioHeatmap
             hm   = PortfolioHeatmap(self.capital, self.db_path)

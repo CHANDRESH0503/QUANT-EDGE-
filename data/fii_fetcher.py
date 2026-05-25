@@ -94,10 +94,13 @@ class FIIFetcher:
             logger.error(f"FII/DII fetch failed: {e}")
             return self._get_latest_from_db()
 
+    # NSE symbols for all 5 tracked banks (used to filter bulk deals)
+    _UNIVERSE_SYMBOLS = {"HDFCBANK", "ICICIBANK", "KOTAKBANK", "AXISBANK", "INDUSINDBK"}
+
     def fetch_bulk_deals(self) -> List[Dict]:
         """
-        Fetch bulk deals from NSE — large institutional transactions.
-        A bulk deal > ₹50 Cr in HDFC Bank = high-conviction signal.
+        Fetch bulk deals from NSE for ALL 5 tracked banks.
+        A bulk deal > ₹50 Cr in any bank = high-conviction institutional signal.
         Published daily by NSE.
         """
         try:
@@ -110,13 +113,14 @@ class FIIFetcher:
                 return []
 
             data = response.json()
-            hdfc_deals = [
+            bank_deals = [
                 d for d in data
-                if "HDFCBANK" in str(d.get("symbol", "")).upper()
+                if any(sym in str(d.get("symbol", "")).upper()
+                       for sym in self._UNIVERSE_SYMBOLS)
             ]
 
-            self._save_bulk_deals(hdfc_deals)
-            return hdfc_deals
+            self._save_bulk_deals(bank_deals)
+            return bank_deals
 
         except Exception as e:
             logger.error(f"Bulk deals fetch failed: {e}")
