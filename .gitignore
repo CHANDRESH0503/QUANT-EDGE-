@@ -5,6 +5,16 @@
 *.env
 secrets.py
 
+# VPS runtime only
+
+database/trading.db
+logs/*.log
+
+logs/*.json
+
+logs/last_predictions_*.json
+
+logs/last_gate_results_*.json
 
 # Model artifacts — too large for git
 models/saved/*.pkl
