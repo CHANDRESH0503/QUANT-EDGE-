@@ -69,6 +69,29 @@ DD multipliers: ≤−2%→1.0× | −4%→0.75× | −6%→0.50× | <−6%→0.
 - **ATR fix** (2026-05-22): `feature_builder` now pulls `atr_14` directly from raw `tech_df` instead of the named-feature dict (which never included it), fixing wildly wrong stops across all non-HDFC banks.
 - **F-alignment size veto** (2026-05-22): was returning `size_mult=0.0` hardcoded, emitting zero-share alerts. Now reads `ALIGNMENT_SIZE["F"] = 0.50` from lookup table. Defensive guard in `signal_engine` refuses signals with `shares=0 / stop=0 / target=0`.
 
+### Exit Engine & Orchestrator (2026-05-25) — Critical Production Bugs Fixed
+
+**Bug 1 — Cross-ticker price contamination (KOTAKBANK exiting at ₹392)**
+- **Root cause**: `ExitEngine.check_all_positions(price)` had no ticker filter. During the exit monitor loop, INDUSINDBK's price (~₹392) was passed to KOTAKBANK's positions (actual price ~₹1800). The KOTAKBANK position's highest_price watermark was ₹1301 (correct), but the 1.5% trailing stop ₹1281 was compared against ₹392 → immediate false exit.
+- **Fix** (`risk/exit_engine.py`): Added `ticker: str = None` to `_get_open_positions()` and `check_all_positions()`. When `ticker` is provided, the DB query filters `WHERE ticker=?`.
+- **Fix** (`signals/signal_engine.py`): `check_exits()` now passes `ticker=self.ticker` so each engine only evaluates its own ticker's positions. Also guards `price <= 0` → returns `[]` before touching the DB.
+
+**Bug 2 — Exit alerts never closing positions (spam every 60s)**
+- **Root cause**: `_run_exit_checks()` in orchestrator called `send_exit()` but never called `close_position()`. Position stayed OPEN in DB → re-triggered on every 60s exit monitor cycle.
+- **Fix** (`orchestrator.py`): `_run_exit_checks()` now calls `close_position()` / `close_position_partial()` first, then `send_exit()`. Added `_closed_this_cycle: set` guard so two engines can't double-close the same position_id.
+
+**Bug 3 — Reversal alert spam every 5 minutes (AXIS POSITIONAL REGIME_ADVERSE)**
+- **Root cause**: `_sent_reversals` was keyed by `position_id` (int). When a POSITIONAL position closed and immediately reopened (new DB id), the prune-by-active_ids logic deleted the old key and the fresh id bypassed dedup → alert fired every cycle. Additionally, `_dispatch_reversal_alerts` had no category filter, so the 5-min intraday-only cycle was checking POSITIONAL/SWING reversals 12×/hr instead of 4×/hr.
+- **Fix** (`orchestrator.py`):
+  - `_sent_reversals` now uses `(ticker, category, reversal_type)` tuple key instead of `pos_id`. Once `(AXISBANK.NS, positional, REGIME_CHANGE)` fires, it won't re-fire until that ticker's position actually closes.
+  - `_dispatch_reversal_alerts(ticker, signal, categories)` accepts the cycle's `categories` list and skips any reversal whose `cat` is not in scope. 5-min intraday cycles skip POSITIONAL/SWING reversals entirely.
+  - `_run_pipeline_cycle` passes `categories` down to `_dispatch_reversal_alerts`.
+  - `_run_exit_checks` clears all `_sent_reversals` entries for that ticker on position close (by iterating tuple keys where `key[0] == ticker`).
+
+**Bug 4 — `close_position_partial()` missing ticker in INSERT**
+- **Root cause**: `closed_trades` INSERT didn't include `ticker` column, causing silent data loss or schema error.
+- **Fix** (`risk/exit_engine.py`): `ticker = pos.get("ticker") or "HDFCBANK.NS"` extracted and included in INSERT.
+
 ### Data
 - **FII daily**: 1,620 rows loaded from CSVs (2026-05-22).
 - **DII data** (2026-05-23): 1,577 rows of MF equity net flows loaded from `dii_cash_daily_data/` into `fii_data.dii_net_cr`. Verified 0% overlap with FII values. 1,525 rows updated; 1,619 total rows now have DII. `dii_3d_norm` and `flow_confluence` features now non-zero.
@@ -88,6 +111,11 @@ DD multipliers: ≤−2%→1.0× | −4%→0.75× | −6%→0.50× | <−6%→0.
 - **FII/DII panel dynamic** (2026-05-23): FII 5D NET, DII 5D NET, confluence badge, and 5-day sparkline (FII green/red + DII blue/amber bars) all live from API.
 - **Portfolio heatmap dynamic** (2026-05-23): open exposure and trade count from `open_trades` DB, with `signal_log.csv` fallback (last row per `(ticker, category)` where `status=SIGNAL`, `shares>0`, `stop>0`). Risk badge (SAFE/WARNING/DANGER) from consecutive losses and month PnL.
 - **System Performance dynamic** (2026-05-23): capital mode, open exposure, open trades count, Sharpe ratio, win rate, profit factor all live from DB + signal_log.
+- **nan/JSON crash fix** (2026-05-25): `OrderFlowAnalyzer` returned `numpy.nan`, causing `json.dumps` ValueError → HTTP 500 on all `/api/*` endpoints. Fix: `_clean_json()` recursive sanitizer in `dashboard_api.py` converts nan/inf/numpy types to 0.0 before `JSONResponse`.
+- **IST timestamp fix** (2026-05-25): VPS runs UTC. `datetime.now()` was displaying UTC labeled as IST. Fix: added `_now_ist = datetime.now(_pytz.timezone("Asia/Kolkata"))` for display fields only; naive `now` retained for DB queries to avoid `TypeError: can't subtract offset-naive and offset-aware`.
+- **API_BASE dynamic prefix** (2026-05-25): Dashboard at `/quant/` path was sending API calls to `http://origin/api/...` (no `/quant` prefix) → 404. Fix: `API_BASE` now derived from `location.pathname` at runtime so it works on both localhost and VPS regardless of path prefix.
+- **Paper Trading Ledger modal** (2026-05-25): clicking the Portfolio Risk Heat Map card opens a full-screen modal. Tabs: OPEN POSITIONS (ticker, category badge, direction, entry/current/stop/target, shares, unrealized P&L, stop dist, target dist, R:R remaining, progress bar, days held) | TRADE HISTORY (last 50 closed with reason badge). Summary strip: 7 live stats. Wired to `/api/trades` endpoint. Auto-refreshes every 30s; Escape closes.
+- **`/api/trades` endpoint** (2026-05-25): returns open positions enriched with live price from `_quotes_cache` (unrealized P&L, distances, progress %) + last 50 closed trades with friendly reason labels + summary (win rate, profit factor, net P&L). Only queries columns that exist in DB schema — removed `confidence, alignment, regime, entry_quality` from SELECT.
 
 ### News
 - **RSS feed audit** (2026-05-23): ET topic feeds removed (0 entries), Business Standard removed (403). Added LiveMint (`/rss/markets`, 35 entries) and CNBCTV18 (200 entries) as shared feeds. Google News remains primary (100 entries, ~93 bank-relevant).
@@ -102,17 +130,30 @@ DD multipliers: ≤−2%→1.0× | −4%→0.75× | −6%→0.50× | <−6%→0.
 
 ---
 
-## Current State (2026-05-23) ✅
+## Current State (2026-05-25) ✅
 - Per-category pipeline live. All 3 categories evaluated every cycle.
 - All 5 banks retrained with FII + DII data (prod variant, 28 features).
 - Dashboard: 3 stacked panels (SWING/POSITIONAL/INTRADAY), client-side market badge, live model features.
 - Dashboard: FII/DII panel, Portfolio heatmap, System Performance all fully dynamic (wired to DB + signal_log).
+- Dashboard: Paper Trading Ledger modal — click Portfolio Heat Map → full open/closed trade view with live P&L.
 - News: `+when:7d` date-restricted query, publication-date filter at insert, `published_iso` column, dashboard + signal pipeline both filter by publication date, NEUTRAL band tightened to ±0.005.
 - Dedup: per-category (`_last_signal_by_cat`). Paper trades tagged by `trade_type`.
+- Exit engine: ticker-scoped position queries (no cross-bank price contamination). Positions closed in DB before Telegram alert.
+- Reversal dedup: `(ticker, category, reversal_type)` tuple key — survives position ID churn. 5-min cycle skips POSITIONAL/SWING reversals.
+- **⚠️ VPS not yet updated** — run `git pull && systemctl restart quantedge-signal quantedge-api` on `165.22.220.126`, then `DELETE FROM open_trades WHERE status='OPEN'` to clear stale paper trades.
 
 ---
 
 ## What's Still Not Done ❌
+
+### Immediate (Deploy blockers)
+0. **Deploy to VPS `165.22.220.126`** — all fixes are committed locally (commits d259532–e845347) but VPS still runs old code:
+   ```bash
+   ssh root@165.22.220.126
+   cd ~/TradingBot && git pull
+   sqlite3 database/trading.db 'DELETE FROM open_trades WHERE status="OPEN";'
+   sudo systemctl restart quantedge-signal quantedge-api
+   ```
 
 ### High Priority
 1. **5 alpha features** — wire into `feature_builder.py` + `*_FEATURES_PROD` lists, retrain Sunday:
