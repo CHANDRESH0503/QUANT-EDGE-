@@ -92,6 +92,61 @@ DD multipliers: ≤−2%→1.0× | −4%→0.75× | −6%→0.50× | <−6%→0.
 - **Root cause**: `closed_trades` INSERT didn't include `ticker` column, causing silent data loss or schema error.
 - **Fix** (`risk/exit_engine.py`): `ticker = pos.get("ticker") or "HDFCBANK.NS"` extracted and included in INSERT.
 
+### Regime Feature Consistency Fix (2026-05-25) — Counter-regime SHORT in BULL — Fixed
+
+**Root cause:** `feature_builder.py` computed `regime_bull/bear/choppy` features using only `_adx > 22` threshold. After IndusInd's recovery from crash (April 2026: ADX briefly hit 53 then decayed back to 20 as consolidation set in), the EMA20/50 spread was +1.7% (bullish) and R20=+2.8% (positive), but ADX=20.2 < 22 → `regime_bull=0`, `regime_choppy=1` fed to ML model. The model predicts SHORT at **69.7%** with regime_choppy=1 (above 65% Gate 6 threshold → EMITTED) but SHORT at only **56.4%** with regime_bull=1 (below 65% → blocked). Gate 1 correctly identified BULL_TRENDING via EMA override, but the ML model was receiving stale CHOPPY features — a hidden Gate 1/Gate 4 inconsistency.
+
+**Fix (`features/feature_builder.py`):** Added EMA override path mirroring `regime_detector.py`:
+```python
+_ema_bull_override = (_esp >  0.015 and _r20 > 0)
+_ema_bear_override = (_esp < -0.015 and _r20 < 0)
+_rule_bull = int((_adx > 22 and _esp >  0.01 and _r20 > 0) or _ema_bull_override)
+_rule_bear = int((_adx > 22 and _esp < -0.01 and _r20 < 0) or _ema_bear_override)
+```
+
+**Effect on each bank:**
+- **INDUSINDBK**: choppy→bull. Intraday SHORT confidence 69.7%→56.4% → blocked by Gate 6 ✅
+- **HDFCBANK**: choppy→bear (EMA spread -3.08% confirms). Now consistent with Gate 1 BEAR_TRENDING ✅
+- **ICICIBANK/KOTAKBANK/AXISBANK**: unchanged (ADX already ≥22 or spread within override range) ✅
+
+**Design rule added**: `regime_bull/bear/choppy` features in `feature_builder.py` MUST stay in sync with the EMA override logic in `regime_detector.py` — same threshold (±1.5% spread + confirming returns).
+
+### Regime Gate (2026-05-25) — INDUSINDBK always CHOPPY_SIDEWAYS — Fixed
+
+**Root cause (3 stacked bugs):**
+1. **Single shared HMM** (`regime_model.pkl`) trained on HDFCBANK's 25yr data — applied to all banks. IndusInd's post-crash return/volatility distribution is out-of-distribution for the HDFCBANK scaler → HMM consistently mapped IndusInd to CHOPPY state.
+2. **`regime_snapshots` had no `ticker` column** — all 5 banks wrote to the same table. `get_recent_regime_trend()` mixed all banks' snapshots → inflated change counts → further suppressed stability.
+3. **EMA override threshold ±2% too wide** — IndusInd in post-crash consolidation had EMA20/50 spread of +1.7%, inside the ±2% band → CHOPPY rescue never fired.
+
+**Fixes:**
+- **Per-ticker regime models** (`models/saved/regime_model_INDUSINDBK.pkl`, etc.): `RegimeDetector` and `RegimeModelTrainer` both accept `ticker` param. `_model_path(ticker)` returns per-bank path; falls back to legacy shared model until each bank is retrained.
+- **`ticker` column added to `regime_snapshots`** with idempotent `ALTER TABLE` migration. `get_recent_regime_trend()` now filters `WHERE ticker=?`.
+- **EMA override threshold ±2% → ±1.5%**: IndusInd's +1.7% spread now triggers BULL_TRENDING rescue correctly.
+- **200-day EMA safety net added**: if price is ≥10% below 200d EMA → override CHOPPY→BEAR_TRENDING. Catches post-crash banks still deeply underwater even if EMA20/50 spread is tight.
+- **`hv10` scalar bug fixed** in `train_regime.py _rule_based`: was missing `.iloc[-1]`, passing a Series to `float()`.
+- **Wired throughout**: `train_all.py` passes `ticker` to `RegimeModelTrainer`. `feature_builder.py` and `signal_engine.py` pass `ticker` to `RegimeDetector`.
+- **`/api/live` regime query** now ticker-scoped: `WHERE ticker=? OR ticker IS NULL`.
+- **Verified result**: IndusInd now correctly reads `BULL_TRENDING 65%` (recovering from crash, price ₹923, EMA spread +1.7%). Was permanently CHOPPY before.
+
+### Dashboard & API Mismatch Fix (2026-05-25)
+
+**Root cause:** `signal_log.csv` fallback was used in both `/api/live` (for `open_trades_count`) and `/api/trades` (for modal rows) when `open_trades` DB was empty. Local machine (empty DB) fell back to 3 old CSV signal entries → showed 3. VPS (1 real DB row) used actual DB → showed 1. Permanent environment-dependent mismatch.
+
+**Fix (`dashboard_api.py`):**
+- `/api/live`: `open_trades_count` and `open_exposure` now use `open_trades` DB **only**. `signal_log.csv` is still read — for `capital_mode` (a string, not a count) — but never used as a position fallback.
+- `/api/trades`: signal_log fallback block removed entirely. Modal always reflects true `open_trades` DB state.
+- `tradingDashboard.html`: LOG badge and `opacity:0.75` removed — positions are always DB-sourced.
+- **Result**: Local shows 0 positions (accurate — no orchestrator running locally), VPS shows its actual DB count. Both environments consistent within themselves.
+
+### Crash / Stability Fixes (2026-05-25)
+
+**Uvicorn segfault on macOS / Python 3.13+ (`loky` semaphore leak):**
+- **Root cause**: `tokenizers` Rust extension (pulled in by `transformers`) spawned a loky thread pool. POSIX semaphore was leaked at process exit → `zsh: segmentation fault uvicorn ...`.
+- **Fix**: Set `TOKENIZERS_PARALLELISM=false`, `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1` **before any import** in `dashboard_api.py` and `orchestrator.py`. In `processing/finbert_sentiment.py`: same env vars inside the `try:` block + `torch.set_num_threads(1)` / `torch.set_num_interop_threads(1)` before `pipeline()` call.
+
+**Deploy — safe position close utility:**
+- Added `graceful_close_for_deploy.py`: interactive script that closes all open positions into `closed_trades` with `exit_reason='DEPLOY_RESTART'` before service restart. Use instead of `DELETE FROM open_trades` which silently destroys trade history.
+
 ### Data
 - **FII daily**: 1,620 rows loaded from CSVs (2026-05-22).
 - **DII data** (2026-05-23): 1,577 rows of MF equity net flows loaded from `dii_cash_daily_data/` into `fii_data.dii_net_cr`. Verified 0% overlap with FII values. 1,525 rows updated; 1,619 total rows now have DII. `dii_3d_norm` and `flow_confluence` features now non-zero.
@@ -109,16 +164,19 @@ DD multipliers: ≤−2%→1.0× | −4%→0.75× | −6%→0.50× | <−6%→0.
 - **Model card features**: all 18 feature rows across swing/positional/intraday computed live from chart candles, order_flow, news, fundamentals.
 - **Signal logging**: 20-col CSV schema with per-category rows (one row per passing category per cycle).
 - **FII/DII panel dynamic** (2026-05-23): FII 5D NET, DII 5D NET, confluence badge, and 5-day sparkline (FII green/red + DII blue/amber bars) all live from API.
-- **Portfolio heatmap dynamic** (2026-05-23): open exposure and trade count from `open_trades` DB, with `signal_log.csv` fallback (last row per `(ticker, category)` where `status=SIGNAL`, `shares>0`, `stop>0`). Risk badge (SAFE/WARNING/DANGER) from consecutive losses and month PnL.
+- **Portfolio heatmap dynamic** (2026-05-23): open exposure and trade count from `open_trades` DB only (signal_log fallback removed 2026-05-25). Risk badge (SAFE/WARNING/DANGER) from consecutive losses and month PnL.
 - **System Performance dynamic** (2026-05-23): capital mode, open exposure, open trades count, Sharpe ratio, win rate, profit factor all live from DB + signal_log.
 - **nan/JSON crash fix** (2026-05-25): `OrderFlowAnalyzer` returned `numpy.nan`, causing `json.dumps` ValueError → HTTP 500 on all `/api/*` endpoints. Fix: `_clean_json()` recursive sanitizer in `dashboard_api.py` converts nan/inf/numpy types to 0.0 before `JSONResponse`.
 - **IST timestamp fix** (2026-05-25): VPS runs UTC. `datetime.now()` was displaying UTC labeled as IST. Fix: added `_now_ist = datetime.now(_pytz.timezone("Asia/Kolkata"))` for display fields only; naive `now` retained for DB queries to avoid `TypeError: can't subtract offset-naive and offset-aware`.
 - **API_BASE dynamic prefix** (2026-05-25): Dashboard at `/quant/` path was sending API calls to `http://origin/api/...` (no `/quant` prefix) → 404. Fix: `API_BASE` now derived from `location.pathname` at runtime so it works on both localhost and VPS regardless of path prefix.
 - **Paper Trading Ledger modal** (2026-05-25): clicking the Portfolio Risk Heat Map card opens a full-screen modal. Tabs: OPEN POSITIONS (ticker, category badge, direction, entry/current/stop/target, shares, unrealized P&L, stop dist, target dist, R:R remaining, progress bar, days held) | TRADE HISTORY (last 50 closed with reason badge). Summary strip: 7 live stats. Wired to `/api/trades` endpoint. Auto-refreshes every 30s; Escape closes.
-- **`/api/trades` endpoint** (2026-05-25): returns open positions enriched with live price from `_quotes_cache` (unrealized P&L, distances, progress %) + last 50 closed trades with friendly reason labels + summary (win rate, profit factor, net P&L). Only queries columns that exist in DB schema — removed `confidence, alignment, regime, entry_quality` from SELECT.
+- **`/api/trades` endpoint** (2026-05-25): returns open positions enriched with live price from `_quotes_cache` (unrealized P&L, distances, progress %) + last 50 closed trades with friendly reason labels + summary (win rate, profit factor, net P&L). Only queries columns that exist in DB schema.
+- **Mismatch fix** (2026-05-25): `/api/trades` and `/api/live` open_trades_count both use DB only — no signal_log fallback. Local always shows 0 (correct), VPS shows real DB state. No more local≠VPS confusion.
 
 ### News
 - **RSS feed audit** (2026-05-23): ET topic feeds removed (0 entries), Business Standard removed (403). Added LiveMint (`/rss/markets`, 35 entries) and CNBCTV18 (200 entries) as shared feeds. Google News remains primary (100 entries, ~93 bank-relevant).
+- **Browser User-Agent for VPS** (2026-05-25): `feedparser.parse(url)` sent no UA — Google News and Indian news sites blocked VPS IPs (DigitalOcean ranges). Added `_fetch_feed_bytes(url)` helper that fetches with Chrome-like UA + Accept headers; feedparser parses the raw bytes. Detailed per-feed logging: 0-entry feeds now log HTTP status + bozo_exception for easy diagnosis.
+- **ET Banking RSS re-added** (2026-05-25): `_ET_BANKING_RSS` shared feed (banking sector) + per-bank ET topic RSS added back to `_build_feeds()`. Works from VPS when browser UA is sent. Serves as Google News fallback when VPS IP is blocked.
 - **Auto-fetch from API** (2026-05-23): `_trigger_news_fetch_bg()` in `dashboard_api.py` fires on every `/api/live` call if news is stale >15 min. Non-blocking daemon thread with `threading.Lock` to prevent concurrent fetches. Runs NewsFetcher + FinBERT scoring in background.
 - **Clickable news** (2026-05-23): each headline is an `<a>` link opening the source article in a new tab; clicking the card row also opens it.
 - **WEAK+/WEAK- bands** (2026-05-23): scores 0.02–0.10 show faint green (WEAK+), −0.02 to −0.10 show faint red (WEAK−) instead of collapsing to NEUTRAL.
@@ -133,31 +191,38 @@ DD multipliers: ≤−2%→1.0× | −4%→0.75× | −6%→0.50× | <−6%→0.
 ## Current State (2026-05-25) ✅
 - Per-category pipeline live. All 3 categories evaluated every cycle.
 - All 5 banks retrained with FII + DII data (prod variant, 28 features).
+- All 5 banks pass Gate 1 (regime) — IndusInd unblocked (was permanent CHOPPY).
+- **Per-bank regime HMMs trained and saved** (`regime_model_{BANK}.pkl` for all 5 banks).
+- **regime_bull/bear/choppy feature consistency fix**: `feature_builder.py` now mirrors the EMA override logic from `regime_detector.py` — prevents counter-regime ML predictions sneaking through when ADX is transitionally low (e.g. IndusInd BULL regime but old logic set regime_choppy=1 → SHORT at 69.7% wrongly passing Gate 6; now regime_bull=1 → 56.4% → correctly blocked).
 - Dashboard: 3 stacked panels (SWING/POSITIONAL/INTRADAY), client-side market badge, live model features.
-- Dashboard: FII/DII panel, Portfolio heatmap, System Performance all fully dynamic (wired to DB + signal_log).
+- Dashboard: FII/DII panel, Portfolio heatmap, System Performance all fully dynamic (DB only, no signal_log fallback).
 - Dashboard: Paper Trading Ledger modal — click Portfolio Heat Map → full open/closed trade view with live P&L.
-- News: `+when:7d` date-restricted query, publication-date filter at insert, `published_iso` column, dashboard + signal pipeline both filter by publication date, NEUTRAL band tightened to ±0.005.
+- Dashboard: local vs VPS mismatch eliminated — both show true DB state.
+- News: browser UA fetch on VPS, ET banking RSS backup, `+when:7d` date-restricted query, `published_iso` column, NEUTRAL band ±0.005.
 - Dedup: per-category (`_last_signal_by_cat`). Paper trades tagged by `trade_type`.
 - Exit engine: ticker-scoped position queries (no cross-bank price contamination). Positions closed in DB before Telegram alert.
 - Reversal dedup: `(ticker, category, reversal_type)` tuple key — survives position ID churn. 5-min cycle skips POSITIONAL/SWING reversals.
-- VPS updated and running (2026-05-25).
+- Regime: per-ticker HMM model files (`regime_model_{BANK}.pkl`). `regime_snapshots` ticker-scoped. EMA override ±1.5% + 200d EMA safety net.
+- DB schema verified: `open_trades` (14 cols), `closed_trades` (13 cols, incl. `trade_type`), `regime_snapshots` (9 cols, incl. `ticker`) — all correct.
+- uvicorn segfault fixed: `TOKENIZERS_PARALLELISM=false` + `torch.set_num_threads(1)` in dashboard_api, orchestrator, finbert_sentiment.
+- `graceful_close_for_deploy.py` added — safe position close before deploy.
+- VPS running. Deploy: `git pull && systemctl restart quantedge-signal quantedge-api`.
 
 ---
 
 ## What's Still Not Done ❌
 
-### Immediate (Deploy blockers)
-0. **Standard deploy procedure** (NEVER delete open_trades blindly):
-   ```bash
-   ssh root@165.22.220.126
-   cd ~/TradingBot && git pull
-   # ⚠️  DO NOT run DELETE FROM open_trades — that destroys live paper positions
-   # Only close positions if the code that manages them changed fundamentally.
-   # To gracefully close all before restart:
-   #   sqlite3 database/trading.db "UPDATE open_trades SET status='CLOSED' WHERE status='OPEN';"
-   #   sqlite3 database/trading.db "INSERT INTO closed_trades SELECT NULL,signal_uuid,ticker,signal,trade_type,entry_price,entry_price,shares,0,0,'DEPLOY_RESTART',datetime('now'),'CLOSED' FROM open_trades WHERE status='CLOSED' AND close_date IS NULL;"
-   sudo systemctl restart quantedge-signal quantedge-api
-   ```
+### Standard Deploy Procedure (NEVER delete open_trades blindly)
+```bash
+ssh root@165.22.220.126
+cd ~/TradingBot
+# Option A — safe deploy (positions survive restart):
+git pull && sudo systemctl restart quantedge-signal quantedge-api
+
+# Option B — need to close positions first (schema change etc.):
+python3 graceful_close_for_deploy.py   # interactive, writes closed_trades record
+git pull && sudo systemctl restart quantedge-signal quantedge-api
+```
 
 ### High Priority
 1. **5 alpha features** — wire into `feature_builder.py` + `*_FEATURES_PROD` lists, retrain Sunday:
@@ -168,10 +233,9 @@ DD multipliers: ≤−2%→1.0× | −4%→0.75× | −6%→0.50× | <−6%→0.
    - `banks_above_50dma_pct` = breadth of 5-bank universe
 
 ### Medium Priority
-2. **GlobalFetcher** — 1 row saved; needs 7+ for rolling macro features to be meaningful
-3. **Fundamentals table** — wired to weekly scheduler (Sunday) but currently 0 rows
-4. **`closed_trades.trade_type` column** — missing; `open_trades` has it. Needed for per-category historical analysis.
-5. **News scoring backlog** — ~15 min lag after fetch (acceptable for swing/positional, marginal for intraday)
+3. **GlobalFetcher** — 1 row saved; needs 7+ for rolling macro features to be meaningful
+4. **Fundamentals table** — wired to weekly scheduler (Sunday) but currently 0 rows
+5. **News on VPS** — browser UA fix deployed but Google News may still block DigitalOcean IPs. Monitor logs: `journalctl -u quantedge-signal | grep "0 entries"`. ET banking RSS serves as fallback.
 
 ### Low Priority
 6. **Gate 3 dashboard** — still uses live universe data; should read from `gate_results.gate3` for consistency
@@ -187,6 +251,7 @@ python3 main.py --ticker=HDFCBANK.NS         # live 24x7 for ONE bank
 python3 orchestrator.py                      # live 24x7 for ALL 5 banks (single process)
 python3 orchestrator.py --once               # single cycle for all 5 banks then exit
 python3 load_dii_and_retrain.py              # load DII CSVs + retrain all 5 banks
+python3 graceful_close_for_deploy.py         # safely close open positions before deploy
 uvicorn dashboard_api:app --host 0.0.0.0 --port 8000
 ```
 Multi-bank: prefer `orchestrator.py` — one process, shared FinBERT model (~1.6 GB
@@ -205,6 +270,7 @@ vs ~8 GB across 5 main.py processes), shared global data fetchers. Falls back to
 7. Retrain only after 8–12 weeks of live outcome data
 8. All training getters use `<= as_of_date` — never peek at future data
 9. Gate 2 raw pass-throughs (`days_to_rbi`, `india_vix_level`, `usdinr_5d_pct`, `nifty_5d_pct`) must stay as raw integers/floats in `feature_builder.py`
+10. `open_trades` DB is the ONLY source of truth for open position counts — never fall back to signal_log for UI counts
 
 ## Deferred
 Bank Nifty futures hedging · shadow-mode deployment · Kelly sizing · `scale_pos_weight` balancing · pooled multi-ticker model with ticker embedding · P3 features (LLM earnings score, social contrarian, Google Trends alt data)
