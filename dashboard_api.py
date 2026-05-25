@@ -479,7 +479,12 @@ async def live_data(
         ticker = "HDFCBANK.NS"
     ticker_safe = ticker.replace(".NS", "")
 
+    # `now` stays naive (server local time) for all timedelta / DB comparisons.
+    # `_now_ist` is IST-aware, used ONLY for the ts/ist display fields so the
+    # dashboard always shows Kolkata time regardless of VPS timezone (UTC).
+    import pytz as _pytz
     now = datetime.now()
+    _now_ist = datetime.now(_pytz.timezone("Asia/Kolkata"))
 
     # ── 1. Batch-fetch all 12 market quotes in parallel (cached 15s) ──
     # Also kicks off the Angel One batch LTP call for all 5 banks.
@@ -930,9 +935,10 @@ async def live_data(
     _trigger_news_fetch_bg()
 
     return JSONResponse(_clean_json({
-        "ts":            now.strftime("%H:%M:%S"),
-        "date":          now.strftime("%a %d %b %Y"),
-        "ist":           now.strftime("%d %b %Y %H:%M IST"),
+        # Display fields use _now_ist (Kolkata time) so VPS in UTC still shows IST.
+        "ts":            _now_ist.strftime("%H:%M:%S"),
+        "date":          _now_ist.strftime("%a %d %b %Y"),
+        "ist":           _now_ist.strftime("%d %b %Y %H:%M IST"),
         "selected_ticker": ticker,
         "market_open":   _is_open,
         "market_status": _mkt_status,

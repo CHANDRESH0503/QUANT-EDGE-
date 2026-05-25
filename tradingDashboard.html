@@ -1974,24 +1974,33 @@ document.addEventListener('DOMContentLoaded', function() {
   if (badge) badge.textContent = selectedTicker.replace('.NS','') + ' · NSE';
 });
 
-// Where to hit the API:
-//   - When the page is served by FastAPI/Nginx (http/https from any real host),
-//     use that same origin — same-origin requests, no CORS preflight.
-//     The FastAPI app serves both '/' (this HTML) and '/api/*', so no prefix.
-//   - When opened as a local file (file://) or from localhost during dev,
-//     point at the local uvicorn process on port 8000.
-// Override for one session: append ?api=http://other.host to the URL.
+// API_BASE — where to send /api/live requests.
+//
+//  Priority 1: ?api=http://other:port in the URL  (immediate override, no cache)
+//  Priority 2: file:// or localhost               → http://localhost:8000  (local dev)
+//  Priority 3: served from a real host            → auto-detect from page path
+//
+// Auto-detect rule: the FastAPI app is always mounted at the same path prefix
+// as the dashboard page itself.
+//   http://host/quant/   → prefix /quant  → API at http://host/quant/api/live
+//   http://host/         → prefix ""      → API at http://host/api/live
+//
+// No localStorage — avoids stale values after re-deploys.
 const API_BASE = (() => {
   const override = new URLSearchParams(location.search).get('api');
-  if (override) { localStorage.setItem('quantedge_api', override); return override; }
-  const stored = localStorage.getItem('quantedge_api');
-  if (stored) return stored;
+  if (override) return override;
+
   const isLocal = location.protocol === 'file:' ||
                   location.hostname === '' ||
                   location.hostname === 'localhost' ||
                   location.hostname === '127.0.0.1';
-  // Local dev → local uvicorn.  Served from real host → same origin (no prefix).
-  return isLocal ? 'http://localhost:8000' : location.origin;
+  if (isLocal) return 'http://localhost:8000';
+
+  // Strip trailing slash, split into segments, drop any file-like last segment.
+  const rawPath = location.pathname.replace(/\/$/, '');
+  const parts   = rawPath.split('/').filter(p => p && !p.includes('.'));
+  const prefix  = parts.length ? '/' + parts.join('/') : '';
+  return location.origin + prefix;
 })();
 
 function buildApiUrl(path) {
