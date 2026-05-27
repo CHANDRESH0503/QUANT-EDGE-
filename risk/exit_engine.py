@@ -573,16 +573,14 @@ class ExitEngine:
 
     def _setup_db(self) -> None:
         """
-        Idempotent schema bootstrap.
+        Safety-net schema for trading tables.
 
-        This is the AUTHORITATIVE schema for trading tables.
-        Kept in sync with database/db_setup.py._trading_tables().
-        All columns that open_position() / close_position() write must
-        exist here so the tables are always ready even if DatabaseSetup
-        hasn't run yet (e.g. unit tests, direct ExitEngine instantiation).
-
-        NEVER remove columns — add them here AND in _migrate_columns()
-        of DatabaseSetup so existing DBs get the column via ALTER TABLE.
+        `database/db_setup.py._trading_tables()` is the AUTHORITATIVE source.
+        This CREATE block exists so ExitEngine works in environments where
+        DatabaseSetup hasn't run yet (unit tests, ad-hoc scripts). The two
+        CREATEs MUST stay byte-equivalent — when you add a column, add it in
+        both files AND to `DatabaseSetup._migrate_columns()` so existing DBs
+        gain the column via ALTER TABLE.
         """
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA journal_mode=WAL")

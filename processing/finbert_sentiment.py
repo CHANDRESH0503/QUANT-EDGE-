@@ -73,6 +73,12 @@ class FinBERTSentiment:
         Called every 15 minutes after news_fetcher.fetch_all().
         Returns count of articles processed.
 
+        Round-robin by ticker (2026-05-26): the previous global
+        `ORDER BY created_at DESC LIMIT 50` starved smaller banks whenever
+        HDFCBANK news volume dominated. We now query per-ticker with an even
+        share of `batch_size` (max(5, batch_size//N)) so every bank's pipeline
+        sees fresh FinBERT scores within a single 15-min cycle.
+
         Also rescores articles that were previously scored 0.0 by the old
         bucketed approach (pre continuous-scoring fix), limiting to the last
         30 days so we don't reprocess the entire 6-year archive. Only runs
@@ -85,30 +91,54 @@ class FinBERTSentiment:
 
         conn  = self._connect()
 
-        # Pass 1: unprocessed articles (processed=0)
-        rows  = conn.execute("""
-            SELECT id, title, summary
+        # Discover the distinct ticker set from the unscored backlog so the
+        # round-robin works whether the table has 1 ticker or 50.
+        ticker_rows = conn.execute("""
+            SELECT ticker, COUNT(*)
             FROM   news
             WHERE  processed = 0
-            ORDER  BY created_at DESC
-            LIMIT  ?
-        """, (batch_size,)).fetchall()
+            GROUP  BY ticker
+        """).fetchall()
+        tickers = [r[0] or "HDFCBANK.NS" for r in ticker_rows] or ["HDFCBANK.NS"]
+        per_ticker = max(5, batch_size // len(tickers))
+
+        # Pass 1: unprocessed articles, balanced per ticker.
+        rows = []
+        for t in tickers:
+            tr = conn.execute("""
+                SELECT id, title, summary
+                FROM   news
+                WHERE  processed = 0 AND ticker = ?
+                ORDER  BY created_at DESC
+                LIMIT  ?
+            """, (t, per_ticker)).fetchall()
+            rows.extend(tr)
+            if len(rows) >= batch_size:
+                rows = rows[:batch_size]
+                break
 
         # Pass 2: articles scored exactly 0.0 by old bucketed method (FinBERT only)
         # Continuous scorer produces non-zero for nearly all articles; exact 0.0
         # means either a genuinely flat article (rare) or a stale bucketed score.
         # We re-run them through FinBERT so they get proper continuous scores.
+        # Round-robin here too so a small bank with a few stale rows isn't
+        # crowded out by HDFC's archive.
         rescore_rows = []
         if not use_keyword_fallback:
-            rescore_rows = conn.execute("""
-                SELECT id, title, summary
-                FROM   news
-                WHERE  processed = 1
-                  AND  ABS(sentiment_score) < 0.001
-                  AND  created_at > datetime('now', '-30 days')
-                ORDER  BY created_at DESC
-                LIMIT  ?
-            """, (batch_size,)).fetchall()
+            for t in tickers:
+                tr = conn.execute("""
+                    SELECT id, title, summary
+                    FROM   news
+                    WHERE  processed = 1 AND ticker = ?
+                      AND  ABS(sentiment_score) < 0.001
+                      AND  created_at > datetime('now', '-30 days')
+                    ORDER  BY created_at DESC
+                    LIMIT  ?
+                """, (t, per_ticker)).fetchall()
+                rescore_rows.extend(tr)
+                if len(rescore_rows) >= batch_size:
+                    rescore_rows = rescore_rows[:batch_size]
+                    break
 
         if not rows and not rescore_rows:
             conn.close()
@@ -334,6 +364,7 @@ class FinBERTSentiment:
         """Same shape as get_sentiment_features_for_ml() but point-in-time."""
         s24 = self.get_daily_sentiment_at(as_of_date, hours=24)
         s72 = self.get_daily_sentiment_at(as_of_date, hours=72)
+        momentum_3d = round(s24["score"] - s72["score"], 4)
         return {
             "finbert_score_24h":      s24["score"],
             "finbert_score_72h":      s72["score"],
@@ -342,7 +373,8 @@ class FinBERTSentiment:
             "finbert_positive_ratio": s24["positive_ratio"],
             "finbert_news_count":     s24["count"],
             "finbert_news_spike":     s24["news_spike"],
-            "finbert_score_trend":    round(s24["score"] - s72["score"], 4),
+            "finbert_score_trend":    momentum_3d,
+            "finbert_momentum_3d":    momentum_3d,   # alpha feature (alias)
         }
 
     def get_sentiment_features_for_ml(self) -> Dict:
@@ -352,6 +384,7 @@ class FinBERTSentiment:
         """
         s24  = self.get_daily_sentiment(hours=24)
         s72  = self.get_daily_sentiment(hours=72)
+        momentum_3d = round(s24["score"] - s72["score"], 4)
 
         return {
             "finbert_score_24h":      s24["score"],
@@ -361,7 +394,11 @@ class FinBERTSentiment:
             "finbert_positive_ratio": s24["positive_ratio"],
             "finbert_news_count":     s24["count"],
             "finbert_news_spike":     s24["news_spike"],
-            "finbert_score_trend":    round(s24["score"] - s72["score"], 4),
+            "finbert_score_trend":    momentum_3d,
+            # Alpha feature (2026-05-26): explicit name for `score_24h − score_72h`
+            # sentiment momentum. Same value as finbert_score_trend; alias kept
+            # for readability in feature lists.
+            "finbert_momentum_3d":    momentum_3d,
         }
 
     # ─────────────────────────────────────────────────────────────

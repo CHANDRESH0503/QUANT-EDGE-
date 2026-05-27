@@ -6,6 +6,7 @@
 import feedparser
 import sqlite3
 import logging
+import os
 import re
 import urllib.request
 import urllib.error
@@ -15,6 +16,12 @@ from email.utils import parsedate_to_datetime
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+# Set QE_IS_VPS=1 in the systemd EnvironmentFile on the production host so we
+# skip Google News on DigitalOcean (datacenter IPs are in Google's blocklist —
+# the Chrome UA doesn't help because IP filtering happens before UA evaluation).
+IS_VPS = os.environ.get("QE_IS_VPS", "0") == "1"
+_VPS_LOGGED = False
 
 # Hard recency cutoff. Articles older than this at insert time are dropped —
 # anything months/years old has no signal for swing/intraday trading decisions.
@@ -177,10 +184,16 @@ class NewsFetcher:
     # PUBLIC METHODS
     # ─────────────────────────────────────────────────────────────
 
-    def fetch_all(self) -> int:
+    # Class-level state for the empty-cycle alarm. Counts consecutive
+    # `fetch_all_banks` calls that ingested zero articles total. Resets to 0
+    # whenever at least one row is inserted.
+    _consecutive_empty_cycles: int = 0
+    _empty_alarm_sent: bool = False
+
+    def fetch_all(self) -> Dict[str, int]:
         """
         Fetch RSS feeds for this bank and save new articles.
-        Returns count of new articles saved.
+        Returns a dict of {source_name: inserted_count}; sum is total new.
         Called every 15 minutes by scheduler (via fetch_all_banks).
         """
         try:
@@ -194,40 +207,66 @@ class NewsFetcher:
                 last = datetime.fromisoformat(str(row[0])[:19])
                 if (datetime.now() - last).total_seconds() < 900:
                     logger.debug(f"News fresh (<15 min) for {self.ticker} — skipping")
-                    return 0
+                    return {}
         except Exception:
             pass
 
         cfg   = BANK_NEWS_CONFIG[self.ticker]
         feeds = self._build_feeds(cfg)
 
-        total_new = 0
+        per_source: Dict[str, int] = {}
         for source_name, feed_url in feeds.items():
             try:
                 count = self._fetch_feed(source_name, feed_url)
-                total_new += count
+                per_source[source_name] = count
                 if count:
                     logger.info(f"[{self.ticker}][{source_name}] {count} new articles")
             except Exception as e:
                 logger.error(f"[{self.ticker}][{source_name}] Feed error: {e}")
+                per_source[source_name] = 0
 
+        total_new = sum(per_source.values())
         logger.info(f"News fetch [{self.ticker}] complete — {total_new} new articles")
-        return total_new
+        return per_source
 
     @classmethod
-    def fetch_all_banks(cls, db_path: str = "database/trading.db") -> int:
+    def fetch_all_banks(cls, db_path: str = "database/trading.db", telegram=None) -> int:
         """
         Fetch news for all 5 banks in sequence.
-        Called by scheduler instead of single-bank fetch_all().
-        Returns total new articles across all banks.
+        Logs one per-source cycle summary at the end.
+        Raises a Telegram alert (if `telegram` is given) when two consecutive
+        cycles ingest zero articles — that signals every feed source is down.
         """
-        total = 0
+        agg: Dict[str, int] = {}
         for ticker in ALL_BANK_TICKERS:
             try:
                 fetcher = cls(db_path=db_path, ticker=ticker)
-                total += fetcher.fetch_all()
+                for source, n in fetcher.fetch_all().items():
+                    agg[source] = agg.get(source, 0) + n
             except Exception as e:
                 logger.error(f"fetch_all_banks failed for {ticker}: {e}")
+
+        total = sum(agg.values())
+        summary = " ".join(f"{k}={v}" for k, v in sorted(agg.items()))
+        logger.info(f"news cycle: {summary} [total={total}]")
+
+        if total == 0:
+            cls._consecutive_empty_cycles += 1
+            if cls._consecutive_empty_cycles >= 2 and not cls._empty_alarm_sent:
+                msg = (
+                    f"⚠️ News pipeline empty for {cls._consecutive_empty_cycles} "
+                    f"consecutive cycles — every feed source returned 0 articles."
+                )
+                logger.warning(msg)
+                if telegram is not None:
+                    try:
+                        telegram.send_raw(msg)
+                        cls._empty_alarm_sent = True
+                    except Exception as e:
+                        logger.warning(f"news empty-cycle alarm telegram failed: {e}")
+        else:
+            cls._consecutive_empty_cycles = 0
+            cls._empty_alarm_sent = False
         return total
 
     def get_recent_unprocessed(self, limit: int = 50) -> List[Dict]:
@@ -355,29 +394,31 @@ class NewsFetcher:
         """Build the RSS feed dict for this bank.
 
         Priority (in fetch order):
-          1. google_news   — 100 date-sorted entries; blocked on some VPS IPs
+          1. google_news   — 100 date-sorted entries; skipped when QE_IS_VPS=1
           2. et_bank       — ET per-bank topic RSS; VPS-friendly with browser UA
           3. et_banking    — ET banking sector RSS (shared); extra coverage
           4. moneycontrol  — shared; VPS-friendly with browser UA
           5. livemint      — shared; VPS-friendly with browser UA
           6. cnbctv18      — shared; VPS-friendly with browser UA
-
-        Google News result count logged — if 0 entries on VPS the ET feeds
-        supply all the news instead.
         """
-        feeds = {
+        global _VPS_LOGGED
+        feeds: Dict[str, str] = {}
+        if not IS_VPS:
             # Google News: date-restricted via when:Nd, sorted newest first.
-            # May return 0 entries from datacenter IPs (DigitalOcean blocklist).
-            "google_news": (
+            # Skipped on VPS — DigitalOcean IPs are in Google's datacenter
+            # blocklist and the request is rejected before UA is read.
+            feeds["google_news"] = (
                 f"https://news.google.com/rss/search"
                 f"?q={cfg['google_query']}+when:{GOOGLE_NEWS_RECENCY_WINDOW}"
                 f"&hl=en-IN&gl=IN&ceid=IN:en"
-            ),
-            # ET per-bank topic RSS — reliable from VPS with browser UA.
-            "et_topic": cfg["et_feed"],
-            # ET banking sector (shared across all banks, keyword-filtered).
-            "et_banking": _ET_BANKING_RSS,
-        }
+            )
+        elif not _VPS_LOGGED:
+            logger.info("VPS mode (QE_IS_VPS=1): Google News disabled (IP-blocklisted)")
+            _VPS_LOGGED = True
+        # ET per-bank topic RSS — reliable from VPS with browser UA.
+        feeds["et_topic"] = cfg["et_feed"]
+        # ET banking sector (shared across all banks, keyword-filtered).
+        feeds["et_banking"] = _ET_BANKING_RSS
         feeds.update(_SHARED_FEEDS)
         return feeds
 

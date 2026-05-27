@@ -29,13 +29,6 @@ NSE_EXPIRY_DATES_2027 = [
 # Combined for forward-looking expiry calculations
 NSE_EXPIRY_DATES_ALL = NSE_EXPIRY_DATES_2026 + NSE_EXPIRY_DATES_2027
 
-# HDFC Bank quarterly result dates — reference BANK_CONFIG as single source of truth
-from config import BANK_CONFIG
-HDFC_EARNINGS_DATES = BANK_CONFIG["HDFCBANK.NS"]["earnings_dates"]
-
-# Kept for backward compatibility — same data
-HDFC_EARNINGS_DATES_2026 = HDFC_EARNINGS_DATES
-
 # India market holidays 2026 (NSE closed)
 NSE_HOLIDAYS_2026 = [
     "2026-01-26", "2026-03-25", "2026-04-02", "2026-04-14",

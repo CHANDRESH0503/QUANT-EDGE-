@@ -148,8 +148,25 @@ class Gate3UniverseRank:
                      if r["score"] >= self.MIN_SCORE_THRESHOLD]
         return qualified[:n] if qualified else [self.PRIMARY_TICKER]
 
+    # Process-wide cache: yfinance hits + ranking math are expensive and the
+    # universe ranking is identical for every bank in the same cycle. One
+    # cache for all Gate3UniverseRank instances; TTL matched to the orchestrator's
+    # full-pipeline interval (5 banks should hit yfinance once per cycle, not 5×).
+    _RANK_CACHE: tuple = (0.0, [])   # (epoch, rankings)
+    _RANK_TTL_SEC: float = 120.0     # 2 min — well under FULL_INTERVAL but > one cycle
+
     def _rank_stocks(self) -> List[Dict]:
-        """Fetch peer prices and compute composite ranking score."""
+        """
+        Fetch peer prices and compute composite ranking score.
+        Memoised across all Gate3UniverseRank instances for `_RANK_TTL_SEC`
+        seconds so a 5-bank cycle does 6 yfinance calls (Bank Nifty + 5 banks)
+        ONCE per cycle instead of 30×. Cache invalidates after TTL.
+        """
+        import time as _time
+        ts, cached = Gate3UniverseRank._RANK_CACHE
+        if cached and (_time.time() - ts) < Gate3UniverseRank._RANK_TTL_SEC:
+            return cached
+
         rankings = []
         try:
             # Fetch Bank Nifty for relative strength calculation
@@ -203,6 +220,9 @@ class Gate3UniverseRank:
         except Exception as e:
             logger.warning(f"Universe ranking error: {e}")
 
+        # Stamp the cache so subsequent banks in the same cycle reuse this work.
+        if rankings:
+            Gate3UniverseRank._RANK_CACHE = (_time.time(), rankings)
         return rankings
 
     def _rsi(self, close: pd.Series, window: int = 14) -> float:

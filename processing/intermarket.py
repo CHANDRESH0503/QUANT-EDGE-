@@ -7,12 +7,25 @@ import numpy as np
 import pandas as pd
 import sqlite3
 import logging
+import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 from data.price_fetcher import yf_safe_download
 
 logger = logging.getLogger(__name__)
+
+# Cross-cycle, cross-bank cache for the universe-wide intermarket fetches.
+# Previously each per-bank FeatureBuilder triggered fresh yfinance calls for
+# peer data (5 tickers) + sector rotation (^NSEI + ^NSEBANK) — 7 calls × 5 banks
+# = 35 redundant yfinance calls per cycle. We now share one fetch across the
+# universe within a TTL window (5 minutes, matches the intraday signal cadence).
+_INTERMARKET_CACHE_TTL_SEC = 300
+_intermarket_cache: Dict[str, "object"] = {
+    "peers":  None,   # peer_data dict
+    "sector": None,   # sector_rotation dict
+    "ts":     0.0,
+}
 
 
 class IntermarketAnalyzer:
@@ -135,7 +148,14 @@ class IntermarketAnalyzer:
         return result
 
     def _fetch_peer_data(self) -> Dict:
-        """Fetch peer bank returns for relative strength analysis."""
+        """Fetch peer bank returns for relative strength analysis.
+        Universe-wide; cached for `_INTERMARKET_CACHE_TTL_SEC` so the 5 banks
+        in one orchestrator cycle share a single yfinance fetch (~5× saved).
+        """
+        cached = _intermarket_cache.get("peers")
+        if cached and (time.time() - _intermarket_cache["ts"]) < _INTERMARKET_CACHE_TTL_SEC:
+            return cached
+
         peers = {}
         for ticker, name in self.PEER_TICKERS.items():
             try:
@@ -150,6 +170,8 @@ class IntermarketAnalyzer:
                 }
             except Exception as e:
                 logger.warning(f"Peer fetch failed for {name}: {e}")
+        _intermarket_cache["peers"] = peers
+        _intermarket_cache["ts"]    = time.time()
         return peers
 
     # ─────────────────────────────────────────────────────────────
@@ -295,9 +317,12 @@ class IntermarketAnalyzer:
                           df_hdfc: pd.DataFrame) -> Dict:
         """
         Is money rotating INTO banks or OUT of banks?
-        Sector rotation is one of the most predictable macro patterns.
-        Measure by comparing Bank Nifty vs Nifty 50 relative performance.
+        Universe-wide signal — cached so all 5 banks in a cycle share one fetch.
         """
+        cached = _intermarket_cache.get("sector")
+        if cached and (time.time() - _intermarket_cache["ts"]) < _INTERMARKET_CACHE_TTL_SEC:
+            return cached
+
         try:
             nifty_df = yf_safe_download("^NSEI",    period="10d")
             bn_df    = yf_safe_download("^NSEBANK", period="10d")
@@ -309,13 +334,16 @@ class IntermarketAnalyzer:
             bn_5d    = float(bn_df["Close"].pct_change(5).iloc[-1] * 100)
             rs       = round(bn_5d - nifty_5d, 3)
 
-            return {
+            result = {
                 "nifty_5d_pct":         round(nifty_5d, 3),
                 "banknifty_5d_pct":     round(bn_5d, 3),
                 "bank_vs_nifty_rs":     rs,
                 "banks_outperforming":  int(rs > 0.5),
                 "banks_underperforming":int(rs < -0.5),
             }
+            _intermarket_cache["sector"] = result
+            _intermarket_cache["ts"]     = time.time()
+            return result
         except Exception as e:
             logger.warning(f"Sector rotation failed: {e}")
             return self._empty_sector()

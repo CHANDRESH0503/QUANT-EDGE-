@@ -1,5 +1,5 @@
 # data/options_fetcher.py
-# Fetches NSE options chain data for HDFC Bank
+# Fetches NSE options chain data for any bank in the 5-bank universe.
 # Calculates: PCR, Max Pain, IV Percentile, Max OI Strikes
 # Source: NSE India public API (free, no key needed)
 
@@ -11,9 +11,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
-logger = logging.getLogger(__name__)
+from config import get_bank_config
 
-NSE_SYMBOL = "HDFCBANK"
+logger = logging.getLogger(__name__)
 
 
 class OptionsFetcher:
@@ -27,6 +27,8 @@ class OptionsFetcher:
     - Implied Move         — expected price move from straddle price
 
     Runs every 30 minutes during market hours.
+    Per-bank: one OptionsFetcher instance per ticker, all snapshots
+    written/read with WHERE ticker = ?  (no cross-bank leakage).
     """
 
     NSE_HEADERS = {
@@ -42,9 +44,12 @@ class OptionsFetcher:
         "Connection": "keep-alive",
     }
 
-    def __init__(self, db_path: str = "database/trading.db"):
-        self.db_path = db_path
-        self._session = self._create_session()
+    def __init__(self, db_path: str = "database/trading.db",
+                 ticker: str = "HDFCBANK.NS"):
+        self.db_path    = db_path
+        self.ticker     = ticker
+        self.nse_symbol = get_bank_config(ticker)["nse_symbol"]
+        self._session   = self._create_session()
         self._setup_db()
 
     # ─────────────────────────────────────────────────────────────
@@ -59,7 +64,7 @@ class OptionsFetcher:
         """
         chain = self._fetch_options_chain()
         if not chain:
-            logger.warning("Options chain fetch returned empty data")
+            logger.warning(f"[{self.ticker}] options chain fetch returned empty data")
             return self._empty_result()
 
         try:
@@ -82,20 +87,19 @@ class OptionsFetcher:
             self._save_snapshot(result)
 
             logger.info(
-                f"Options: PCR={result['pcr']:.2f} | "
+                f"[{self.ticker}] Options: PCR={result['pcr']:.2f} | "
                 f"MaxPain=₹{result['max_pain']} | "
                 f"IV%ile={result['iv_percentile']:.0f}%"
             )
             return result
 
         except Exception as e:
-            logger.error(f"Options calculation failed: {e}")
+            logger.error(f"[{self.ticker}] options calculation failed: {e}")
             return self._empty_result()
 
     def get_latest(self) -> Dict:
         """
-        Get most recent options snapshot from DB (no API call).
-        Used when market is closed or for quick reads.
+        Get most recent options snapshot from DB (no API call) for THIS ticker.
         """
         conn = self._connect()
         row = conn.execute("""
@@ -103,9 +107,10 @@ class OptionsFetcher:
                    max_call_oi_strike, max_put_oi_strike,
                    implied_move_pct, spot_price, fetched_at
             FROM options_snapshots
+            WHERE ticker = ?
             ORDER BY fetched_at DESC
             LIMIT 1
-        """).fetchone()
+        """, (self.ticker,)).fetchone()
         conn.close()
 
         if not row:
@@ -125,7 +130,7 @@ class OptionsFetcher:
 
     def get_snapshot_at(self, as_of_date: str) -> Dict:
         """
-        Point-in-time snapshot lookup for training/backtest.
+        Point-in-time snapshot lookup for training/backtest — scoped to this ticker.
         Returns the most recent options_snapshots row with fetched_at <= as_of_date.
         Same shape as get_latest(). Empty result if no row exists.
 
@@ -138,10 +143,10 @@ class OptionsFetcher:
                    max_call_oi_strike, max_put_oi_strike,
                    implied_move_pct, spot_price, fetched_at
             FROM   options_snapshots
-            WHERE  fetched_at <= ?
+            WHERE  ticker = ? AND fetched_at <= ?
             ORDER  BY fetched_at DESC
             LIMIT  1
-        """, (as_of_date,)).fetchone()
+        """, (self.ticker, as_of_date)).fetchone()
         conn.close()
 
         if not row:
@@ -254,15 +259,16 @@ class OptionsFetcher:
 
     def _calculate_pcr_roc(self) -> float:
         """
-        PCR Rate of Change vs 5 days ago.
+        PCR Rate of Change vs 5 days ago — scoped to this ticker.
         Increasing PCR = institutions buying more protection = warning.
         """
         conn = self._connect()
         rows = conn.execute("""
             SELECT pcr FROM options_snapshots
+            WHERE  ticker = ?
             ORDER BY fetched_at DESC
             LIMIT 10
-        """).fetchall()
+        """, (self.ticker,)).fetchall()
         conn.close()
 
         if len(rows) < 2:
@@ -315,7 +321,7 @@ class OptionsFetcher:
 
     def _calculate_iv_percentile(self, chain: Dict) -> float:
         """
-        IV Percentile = where current ATM IV sits vs last 252 readings.
+        IV Percentile = where current ATM IV sits vs last 252 readings — per ticker.
         Low IV pct = options cheap, buy them.
         High IV pct = options expensive, sell them.
         """
@@ -323,14 +329,14 @@ class OptionsFetcher:
         if current_iv == 0:
             return 50.0
 
-        # Get historical IV readings
+        # Get historical IV readings for THIS ticker
         conn = self._connect()
         rows = conn.execute("""
             SELECT atm_iv FROM options_snapshots
-            WHERE atm_iv > 0
+            WHERE  ticker = ? AND atm_iv > 0
             ORDER BY fetched_at DESC
             LIMIT 252
-        """).fetchall()
+        """, (self.ticker,)).fetchall()
         conn.close()
 
         if len(rows) < 10:
@@ -438,10 +444,10 @@ class OptionsFetcher:
     # ─────────────────────────────────────────────────────────────
 
     def _fetch_options_chain(self) -> Dict:
-        """Fetch live options chain from NSE."""
+        """Fetch live options chain from NSE for this ticker's NSE symbol."""
         url = (
             f"https://www.nseindia.com/api/option-chain-equities"
-            f"?symbol={NSE_SYMBOL}"
+            f"?symbol={self.nse_symbol}"
         )
         try:
             response = self._session.get(
@@ -450,23 +456,24 @@ class OptionsFetcher:
             if response.status_code == 200:
                 return response.json()
             else:
-                logger.warning(f"NSE options chain returned {response.status_code}")
+                logger.warning(f"[{self.ticker}] NSE options chain returned {response.status_code}")
                 return {}
         except Exception as e:
-            logger.error(f"Options chain fetch failed: {e}")
+            logger.error(f"[{self.ticker}] options chain fetch failed: {e}")
             return {}
 
     def _save_snapshot(self, data: Dict) -> None:
-        """Save options snapshot to DB for PCR ROC and IV percentile."""
+        """Save options snapshot to DB — always tagged with ticker."""
         conn = self._connect()
         conn.execute("""
             INSERT INTO options_snapshots
-            (pcr, pcr_roc, max_pain, iv_percentile, atm_iv,
+            (ticker, pcr, pcr_roc, max_pain, iv_percentile, atm_iv,
              max_call_oi_strike, max_put_oi_strike,
              implied_move_pct, total_call_oi, total_put_oi,
              spot_price, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
+            self.ticker,
             data.get("pcr", 1.0),
             data.get("pcr_roc", 0.0),
             data.get("max_pain", 0),
@@ -542,10 +549,14 @@ class OptionsFetcher:
         }
 
     def _setup_db(self) -> None:
+        # Authoritative schema lives in database/db_setup.py; this is a safety
+        # net so a callsite hitting OptionsFetcher before setup_all() still gets
+        # the ticker column. Use IF NOT EXISTS + best-effort migration.
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS options_snapshots (
                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker               TEXT    NOT NULL,
                 pcr                  REAL,
                 pcr_roc              REAL,
                 max_pain             REAL,
@@ -560,9 +571,17 @@ class OptionsFetcher:
                 fetched_at           TEXT
             )
         """)
+        # Migrate legacy table that may be missing the ticker column.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(options_snapshots)")}
+        if "ticker" not in cols:
+            conn.execute("ALTER TABLE options_snapshots ADD COLUMN ticker TEXT")
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_options_fetched
             ON options_snapshots (fetched_at DESC)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_options_ticker_fetched
+            ON options_snapshots (ticker, fetched_at DESC)
         """)
         conn.commit()
         conn.close()

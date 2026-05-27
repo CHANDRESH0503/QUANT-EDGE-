@@ -31,6 +31,7 @@ class SentimentFeatures:
         "finbert_score_24h",
         "finbert_score_trend",      # improving or deteriorating
         "finbert_momentum",         # today vs yesterday
+        "finbert_momentum_3d",      # score_24h − score_72h (alpha 2026-05-26)
         "finbert_news_spike",       # volume anomaly
         "llm_earnings_score",
         "llm_earnings_relevance",   # decays over 90 days
@@ -77,6 +78,10 @@ class SentimentFeatures:
             "finbert_score_24h":       round(finbert_24h, 4),
             "finbert_score_trend":     round(finbert_trend, 4),
             "finbert_momentum":        round(momentum, 4),
+            # Alpha (2026-05-26): explicit 3-day sentiment momentum.
+            # Same definition as finbert_score_trend; kept as a stable name
+            # in the prod feature lists so retrains don't have to migrate.
+            "finbert_momentum_3d":     round(finbert_trend, 4),
             "finbert_news_spike":      round(news_spike, 4),
             "llm_earnings_score":      round(earnings_score * earnings_relev, 4),
             "llm_earnings_relevance":  round(earnings_relev, 4),

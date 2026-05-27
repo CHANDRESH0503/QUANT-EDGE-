@@ -1,7 +1,7 @@
 # signals/signal_engine.py
 # Master signal orchestrator — runs all 6 gates in sequence
 # Assembles final signal with risk parameters
-# Called every 15 minutes by scheduler/task_runner.py
+# Called every 15 minutes by orchestrator.py (one engine per bank).
 
 import logging
 import sqlite3
@@ -233,15 +233,42 @@ class SignalEngine:
                 f"size={g3_ctx.get('size_mult', 1.0):.2f} ✓"
             )
 
-        # ── Feature quality check (pre-Gate-4 diagnostic) ─────────
-        dq = feature_vector.get("data_quality", {})
-        if dq.get("quality") in ("DEGRADED", "POOR"):
-            zero_n = dq.get("zero_features", "?")
-            total  = dq.get("total_features", "?")
+        # ── Feature quality gate (HARD for POOR, +5pp boost for DEGRADED) ─
+        # Policy (locked 2026-05-26):
+        #   POOR     → return FLAT immediately (cannot trust the feature vector).
+        #   DEGRADED → proceed, but Gate 6 lifts the per-category threshold by
+        #              5pp to demand stronger conviction when data is sparse.
+        #   GOOD     → no adjustment.
+        # The threshold boost is applied below (see `dq_threshold_boost`); a
+        # DEGRADED signal must clear (cat_threshold + 0.05) at Gate 6.
+        dq            = feature_vector.get("data_quality", {})
+        dq_quality    = dq.get("quality", "GOOD")
+        zero_n        = dq.get("zero_features", "?")
+        total         = dq.get("total_features", "?")
+
+        if dq_quality == "POOR":
+            gate_results["data_quality"] = {
+                "passed": False, "quality": "POOR",
+                "zero_features": zero_n, "total_features": total,
+            }
+            return self._flat(
+                f"Data quality POOR — {zero_n}/{total} zero features. "
+                f"Refusing to trade with unreliable feature vector.",
+                gate_results, t0, signal_uuid,
+            )
+
+        dq_threshold_boost = 0.05 if dq_quality == "DEGRADED" else 0.0
+        gate_results["data_quality"] = {
+            "passed":         True,
+            "quality":        dq_quality,
+            "zero_features":  zero_n,
+            "total_features": total,
+            "threshold_boost": dq_threshold_boost,
+        }
+        if dq_quality == "DEGRADED":
             logger.warning(
-                f"Feature quality {dq.get('quality')} — "
-                f"{zero_n}/{total} features are zero. "
-                f"Prod model uses non-zero subset; full model predictions unreliable."
+                f"Feature quality DEGRADED — {zero_n}/{total} zero features. "
+                f"Gate 6 threshold raised by +5pp."
             )
 
         # ── Gate 4: ML models ──────────────────────────────────────
@@ -288,9 +315,34 @@ class SignalEngine:
         per_category   = {}
         signals_emitted = []
 
+        # Capital-mode allowed timeframes — SMALL only trades swing, GROWING
+        # adds intraday, FULL unlocks positional. A category not in the
+        # allow-list short-circuits to a structured FLAT with the reason
+        # surfaced so the dashboard shows WHY no signal fired (not just "FLAT").
+        from risk.capital_mode import CapitalMode as _CapMode
+        _cap_cfg = _CapMode.MODES.get(capital_mode, _CapMode.MODES["FULL"])
+        allowed_tf = set(_cap_cfg.get("allowed_tf", ["swing", "intraday", "positional"]))
+
         for cat in ("swing", "positional", "intraday"):
             direction = cat_dir[cat]
             conf_b    = cat_conf[cat]
+
+            # ── Capital-mode timeframe gate ──────────────────────
+            if cat not in allowed_tf:
+                per_category[cat] = {
+                    "category":   cat,
+                    "passed":     False,
+                    "direction":  direction,
+                    "confidence": round(conf_b, 4),
+                    "reason":     (
+                        f"{capital_mode} capital mode disallows {cat} trades "
+                        f"(allowed: {', '.join(sorted(allowed_tf))})"
+                    ),
+                    "regime_match": None,
+                    "gate5":      None,
+                    "gate6":      None,
+                }
+                continue
 
             # ── FLAT category — no direction to validate ─────────
             if direction == "FLAT":
@@ -320,6 +372,17 @@ class SignalEngine:
 
             # ── Gate 6: confidence with this category's threshold ─
             # alignment is informational only in per-category mode.
+            # Threshold lifters that stack additively (capped at +0.15 total):
+            #   • DEGRADED feature vector → +5pp (every category)
+            #   • Fundamentals DEFAULTED  → +5pp (positional only — long-hold
+            #                                    most exposed to fundamental surprises)
+            #   • Macro data stale (>30h) → +5pp (positional only — macro
+            #                                    backdrop most matters here)
+            cat_boost = dq_threshold_boost
+            if cat == "positional" and g2_ctx.get("fundamentals_stale"):
+                cat_boost = min(0.15, cat_boost + 0.05)
+            if cat == "positional" and int(raw.get("macro_stale", 0)) == 1:
+                cat_boost = min(0.15, cat_boost + 0.05)
             g6_pass, g6_ctx = self.gate6.check(
                 primary_conf=conf_b,
                 alignment=alignment,
@@ -327,6 +390,7 @@ class SignalEngine:
                 risk_context=risk_context,
                 model_type=cat,
                 skip_alignment=True,
+                data_quality_boost=cat_boost,
             )
 
             # Regime-direction match flag — informational only (drives
@@ -733,19 +797,40 @@ class SignalEngine:
             logger.debug(f"last_predictions write failed: {e}")
 
     def _save_gate_results(self, gate_results: Dict, regime: str) -> None:
-        """Write last gate_results to JSON so dashboard shows real gate statuses."""
+        """UPSERT latest gate_results into the DB so the dashboard reads one
+        source of truth. Also writes the legacy JSON file as a transitional
+        fallback — to be removed once the DB read is verified on the VPS.
+        """
+        written_at = str(datetime.now())
+        try:
+            payload_json = json.dumps(gate_results, default=str)
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("""
+                INSERT INTO gate_results (ticker, gate_results, regime, written_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    gate_results = excluded.gate_results,
+                    regime       = excluded.regime,
+                    written_at   = excluded.written_at
+            """, (self.ticker, payload_json, regime, written_at))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"gate_results DB upsert failed: {e}")
+
+        # Legacy JSON fallback — dashboard checks DB first, this file second.
         try:
             os.makedirs("logs", exist_ok=True)
             ticker_safe = self.ticker.replace(".NS", "")
             payload = {
                 "gate_results": gate_results,
                 "regime":       regime,
-                "written_at":   str(datetime.now()),
+                "written_at":   written_at,
             }
             with open(f"logs/last_gate_results_{ticker_safe}.json", "w") as f:
                 json.dump(payload, f, default=str)
         except Exception as e:
-            logger.debug(f"last_gate_results write failed: {e}")
+            logger.debug(f"last_gate_results JSON write failed: {e}")
 
     def _log_signal(self, signal: Dict) -> None:
         """

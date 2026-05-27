@@ -49,6 +49,70 @@ from features.meta_features        import MetaFeatures
 from features.risk_features        import RiskFeatures
 
 
+# ── SHARED REGIME CLASSIFIER ───────────────────────────────────────────────
+# One classifier, used by both the live override path (line ~580) AND the
+# bulk training path (`_compute_bulk_regime_features`). The two MUST stay in
+# sync, otherwise we train on one definition of regime_bull/bear/choppy and
+# infer on another. The EMA-spread override at |spread|>1.5% is the same one
+# Gate 1's RegimeDetector uses, ensuring the ML model sees the same regime
+# tag Gate 1 used.
+_REGIME_ADX_TREND_MIN = 22.0   # ADX threshold for "trending" classification
+_REGIME_ADX_HVOL_MIN  = 30.0   # ADX threshold for "high vol" overlay
+_REGIME_EMA_TREND_MIN = 0.01   # ±1% EMA spread (ADX-confirmed path)
+_REGIME_EMA_OVERRIDE  = 0.015  # ±1.5% EMA spread (low-ADX override path)
+_REGIME_HVOL_R5_MIN   = 0.025  # |5d return| > 2.5% for HIGH_VOL
+
+
+def classify_regime_row(adx: float, ema_spread: float,
+                        returns_20d: float = 0.0, returns_5d: float = 0.0) -> Dict[str, int]:
+    """
+    Return one-hot {regime_bull, regime_bear, regime_high_vol, regime_choppy}
+    given a single bar's indicators. Pure function — no DB, no state.
+
+    Regime is now classified PURELY from ADX + EMA spread (trend strength +
+    trend direction). The previous version mixed PAST 20-day returns into the
+    regime label while ML training labels used FORWARD 5-day returns; the
+    model then learned a mean-reversion pattern that surfaced as "LONG in
+    BEAR / SHORT in BULL" (audit CR-1A). ADX + EMA spread cleanly characterise
+    "is the price trending and which way" without forcing past-vs-future
+    return contradictions into the training set.
+
+    Two paths to BULL/BEAR:
+      (a) ADX > 22 AND |EMA spread| > 1%      →  ADX-confirmed trend
+      (b) |EMA spread| > 1.5%                 →  early-trend EMA override
+    HIGH_VOL: ADX > 30 AND |5d return| > 2.5% (returns_5d kept for volatility
+    overlay only — never feeds bull/bear direction).
+    CHOPPY: not any of the above.
+
+    `returns_20d` and `returns_5d` are kept as parameters for backward
+    compatibility with callers; `returns_5d` is consumed by the HIGH_VOL
+    overlay, `returns_20d` is unused.
+    """
+    adx = float(adx or 0.0)
+    esp = float(ema_spread or 0.0)
+    r5  = float(returns_5d  or 0.0)
+
+    ema_bull_override = (esp >  _REGIME_EMA_OVERRIDE)
+    ema_bear_override = (esp < -_REGIME_EMA_OVERRIDE)
+
+    is_bear = int(
+        (adx > _REGIME_ADX_TREND_MIN and esp < -_REGIME_EMA_TREND_MIN)
+        or ema_bear_override
+    )
+    is_bull = int(
+        (adx > _REGIME_ADX_TREND_MIN and esp >  _REGIME_EMA_TREND_MIN)
+        or ema_bull_override
+    )
+    is_hvol = int(adx > _REGIME_ADX_HVOL_MIN and abs(r5) > _REGIME_HVOL_R5_MIN)
+    is_chop = int(not is_bear and not is_bull and not is_hvol)
+    return {
+        "regime_bear":     is_bear,
+        "regime_bull":     is_bull,
+        "regime_high_vol": is_hvol,
+        "regime_choppy":   is_chop,
+    }
+
+
 class FeatureBuilder:
     """
     Master feature assembly pipeline — the brain of the trading system.
@@ -158,17 +222,20 @@ class FeatureBuilder:
         "obv_roc", "mfi", "volume_ratio", "close_pct_range",
         # Price action (3)
         "returns_1d", "returns_5d", "returns_20d",
-        # Sentiment — FinBERT only (3)
+        # Sentiment — FinBERT only (4)
         "finbert_score_24h", "finbert_score_trend", "finbert_news_spike",
+        "finbert_momentum_3d",         # alpha 2026-05-26
         # Options — confirmed non-zero (5)
         "pcr_norm", "max_pain_dist_norm", "iv_percentile_norm",
         "implied_move_norm", "expiry_proximity",
-        # Flow — monthly FII only (2)
+        # Flow — monthly FII only (3)
         "fii_5d_norm", "fii_signal",
-        # Macro — all confirmed non-zero (9)
+        "fii_flow_surprise",           # alpha 2026-05-26
+        # Macro — all confirmed non-zero (10)
         "india_vix_norm", "rbi_proximity_norm", "rbi_cutting_cycle",
         "dollar_stress", "rupee_stress", "yield_headwind",
         "crude_risk", "macro_score", "intermarket_score",
+        "banknifty_relative_momentum_5d",  # alpha 2026-05-26
         # Calendar (5)
         "earnings_proximity", "earnings_risk_flag",
         "is_expiry_week", "is_monday", "holiday_proximity",
@@ -177,7 +244,10 @@ class FeatureBuilder:
         "regime_choppy", "regime_stability",
         # Pattern (1)
         "pattern_score",
-    ]  # Total: 48 features
+        # Volatility + Breadth alphas (2)
+        "atr_percentile_252",          # alpha 2026-05-26
+        "banks_above_50dma_pct",       # alpha 2026-05-26
+    ]  # Total: 53 features (48 + 5 alpha)
 
     INTRADAY_FEATURES_PROD = [
         # Technical — fast momentum (10)
@@ -187,19 +257,24 @@ class FeatureBuilder:
         # Price levels (4)
         "gap_pct", "support_dist", "resistance_dist",
         "vwap_dist",
-        # Sentiment — FinBERT (2)
+        # Sentiment — FinBERT (3)
         "finbert_score_24h", "finbert_news_spike",
+        "finbert_momentum_3d",         # alpha 2026-05-26
         # Options (3)
         "pcr_norm", "max_pain_dist_norm", "expiry_proximity",
         # Calendar (4)
         "is_expiry_week", "is_monday", "earnings_risk_flag", "holiday_proximity",
-        # Macro (2)
+        # Macro (3)
         "india_vix_norm", "dollar_stress",
+        "banknifty_relative_momentum_5d",  # alpha 2026-05-26
         # Pattern (1)
         "pattern_score",
         # Regime (3)
         "regime_bull", "regime_bear", "regime_choppy",
-    ]  # Total: 29 features
+        # Volatility + Breadth alphas (2)
+        "atr_percentile_252",          # alpha 2026-05-26
+        "banks_above_50dma_pct",       # alpha 2026-05-26
+    ]  # Total: 33 features (29 + 4 alpha; fii_flow_surprise omitted — intraday not flow-driven)
 
     POSITIONAL_FEATURES_PROD = [
         # Technical — weekly / long-term trend (9)
@@ -208,14 +283,17 @@ class FeatureBuilder:
         "range_pct_52w", "hv_ratio",
         # Price levels (2)
         "support_dist", "resistance_dist",
-        # Sentiment — FinBERT (2)
+        # Sentiment — FinBERT (3)
         "finbert_score_24h", "finbert_score_trend",
-        # Macro / Intermarket (9)
+        "finbert_momentum_3d",         # alpha 2026-05-26
+        # Macro / Intermarket (10)
         "india_vix_norm", "rbi_proximity_norm", "rbi_cutting_cycle",
         "dollar_stress", "rupee_stress", "yield_headwind",
         "crude_risk", "macro_score", "intermarket_score",
-        # Flow — monthly FII only (2)
+        "banknifty_relative_momentum_5d",  # alpha 2026-05-26
+        # Flow — monthly FII only (3)
         "fii_5d_norm", "fii_signal",
+        "fii_flow_surprise",           # alpha 2026-05-26
         # Options (3)
         "pcr_norm", "iv_percentile_norm", "implied_move_norm",
         # Calendar (4)
@@ -223,7 +301,10 @@ class FeatureBuilder:
         "is_expiry_week", "holiday_proximity",
         # Regime (3)
         "regime_bull", "regime_bear", "regime_stability",
-    ]  # Total: 34 features
+        # Volatility + Breadth alphas (2)
+        "atr_percentile_252",          # alpha 2026-05-26
+        "banks_above_50dma_pct",       # alpha 2026-05-26
+    ]  # Total: 39 features (34 + 5 alpha)
 
     INTRADAY_FEATURES = [
         # Technical — fast momentum
@@ -323,7 +404,7 @@ class FeatureBuilder:
 
         # ── Data layer ─────────────────────────────────────────────
         self.price_fetcher    = PriceFetcher(ticker)
-        self.options_fetcher  = OptionsFetcher(db_path)
+        self.options_fetcher  = OptionsFetcher(db_path, ticker=ticker)
         self.fii_fetcher      = FIIFetcher(db_path)
         self.global_fetcher   = GlobalFetcher(db_path)
         self.social_fetcher   = SocialFetcher(db_path)
@@ -343,10 +424,51 @@ class FeatureBuilder:
         self.risk_feats  = RiskFeatures()
 
         self._setup_db()
+
+        # Process-level cache for universe-wide breadth alpha feature.
+        # Format: (timestamp_epoch, value). Refreshed every 15 minutes so a
+        # 5-bank cycle hits yfinance once, not 5×.
+        self._breadth_cache: tuple = (0.0, 0.5)
+        self._breadth_ttl_sec      = 900   # 15 min
+
         logger.info(
             f"FeatureBuilder ready — ticker={ticker} "
             f"capital=₹{capital:,.0f} db={db_path}"
         )
+
+    def _universe_above_50dma(self) -> float:
+        """
+        Alpha: fraction of the 5-bank universe trading above its 50-day SMA.
+        Cached for 15 min to avoid 5× yfinance hits in a single cycle.
+        """
+        import time as _time
+        ts, val = self._breadth_cache
+        if (_time.time() - ts) < self._breadth_ttl_sec:
+            return val
+
+        try:
+            from config import TradingConfig
+            universe = list(TradingConfig.UNIVERSE)
+            above    = 0
+            total    = 0
+            for t in universe:
+                try:
+                    df = PriceFetcher(t).get_latest_daily(days=80)
+                    if df is None or df.empty or len(df) < 50:
+                        continue
+                    sma50 = float(df["Close"].tail(50).mean())
+                    last  = float(df["Close"].iloc[-1])
+                    if sma50 > 0:
+                        above += int(last > sma50)
+                        total += 1
+                except Exception:
+                    continue
+            pct = round(above / total, 4) if total > 0 else 0.5
+        except Exception:
+            pct = 0.5
+
+        self._breadth_cache = (_time.time(), pct)
+        return pct
 
     # ──────────────────────────────────────────────────────────────────────────
     # PRIMARY PUBLIC METHOD
@@ -448,6 +570,18 @@ class FeatureBuilder:
         macro_raw   = self.macro.get_macro_features()
         im_raw      = self.intermarket.get_intermarket_features(df_daily)
         macro_feats = self.macro_feats.extract(macro_raw, im_raw)
+        # Freshness check: if global_snapshots is older than 30h, the macro/
+        # intermarket features above are computed from stale market context.
+        # Bubble the flag so _data_quality nudges the snapshot toward DEGRADED,
+        # which triggers H1's +5pp Gate 6 confidence threshold.
+        try:
+            if self.global_fetcher.is_stale(max_age_hours=30):
+                logger.warning("global_snapshots stale (>30h) — flagging macro_stale=1")
+                macro_feats["macro_stale"] = 1
+            else:
+                macro_feats["macro_stale"] = 0
+        except Exception:
+            macro_feats["macro_stale"] = 0
 
         # ── STEP 6: Options ────────────────────────────────────────
         logger.info("[6/10] Options chain (PCR, max pain, IV)")
@@ -558,35 +692,59 @@ class FeatureBuilder:
         raw["macro_event_mult"]   = macro_raw.get("macro_event_mult",    1.0)
         raw["earnings_size_mult"] = earn_raw.get("earnings_size_mult",   1.0)
         raw["fundamental_grade"]  = fund_raw.get("fundamental_grade", "GOOD")
+        raw["macro_stale"]        = int(macro_raw.get("macro_stale",      0))
 
-        # Override regime_* features in raw_features with rule-based classification
-        # so the ML model sees the same definition as was used during training.
-        # Gate 1 still uses the HMM-based regime_result dict (not raw_features).
-        #
-        # FIX (2026-05-25): Added EMA-override path to match regime_detector.py Gate 1 logic.
-        # Problem: Gate 1 uses an EMA spread override (|spread|>1.5%) for stocks with low ADX
-        # that are in early trend recovery (e.g. INDUSINDBK after 2yr crash — ADX=20, but
-        # EMA20>EMA50 by 1.7%). Without this fix, regime_bull=0 (choppy) feeds the ML model
-        # → SHORT at 69.7% confidence (above 65% Gate 6 threshold). With the fix, regime_bull=1
-        # → SHORT only at 56.4% confidence (below threshold → correctly blocked).
-        _adx    = float(raw.get("adx",        0))
-        _esp    = float(raw.get("ema_spread",  0))
-        _r20    = float(raw.get("returns_20d", 0))
-        _r5     = float(raw.get("returns_5d",  0))
-        # EMA override mirrors regime_detector.py: if |EMA spread| > 1.5% AND returns confirm,
-        # classify as trending even when ADX hasn't crossed 22 yet (early trend recovery).
-        _ema_bull_override = (_esp >  0.015 and _r20 > 0)
-        _ema_bear_override = (_esp < -0.015 and _r20 < 0)
-        _rule_bear = int((_adx > 22 and _esp < -0.01 and _r20 < 0) or _ema_bear_override)
-        _rule_bull = int((_adx > 22 and _esp >  0.01 and _r20 > 0) or _ema_bull_override)
-        _rule_hvol = int(_adx > 30 and abs(_r5) > 0.025)
-        _rule_chop = int(not _rule_bear and not _rule_bull and not _rule_hvol)
-        raw["regime_bear"]      = _rule_bear
-        raw["regime_bull"]      = _rule_bull
-        raw["regime_high_vol"]  = _rule_hvol
-        raw["regime_choppy"]    = _rule_chop
-        # Stability from HMM is still meaningful — keep it
-        raw["regime_stability"] = float(raw.get("regime_stability", 0.5))
+        # Override regime_* features with the SHARED rule-based classifier
+        # (`classify_regime_row`, top of this file). The bulk training path
+        # uses the same helper, so what the model trained on is what live
+        # inference sees. Gate 1 still uses the HMM-based regime_result dict.
+        _flags = classify_regime_row(
+            adx         = raw.get("adx",        0),
+            ema_spread  = raw.get("ema_spread", 0),
+            returns_20d = raw.get("returns_20d", 0),
+            returns_5d  = raw.get("returns_5d",  0),
+        )
+        raw["regime_bear"]     = _flags["regime_bear"]
+        raw["regime_bull"]     = _flags["regime_bull"]
+        raw["regime_high_vol"] = _flags["regime_high_vol"]
+        raw["regime_choppy"]   = _flags["regime_choppy"]
+        # Stability: prefer the current cycle's regime_result (fresh, per-ticker)
+        # over whatever was merged from get_regime_features_for_ml(). This avoids
+        # reading a stale DB row on the first orchestrator pass for a newly-onboarded
+        # bank, and keeps the ML model aligned with what Gate 1 actually computed.
+        _live_stab = regime_result.get("stability") if isinstance(regime_result, dict) else None
+        if _live_stab is not None:
+            raw["regime_stability"] = float(_live_stab)
+        else:
+            raw["regime_stability"] = float(raw.get("regime_stability", 0.5))
+
+        # ── Alpha features (2026-05-26) ────────────────────────────
+        # atr_percentile_252: where today's ATR sits in its trailing-252 distribution.
+        # Useful for ML to know whether we're in a low-vol regime (squeeze /
+        # mean-revert favoured) or high-vol regime (breakout / momentum favoured).
+        # Returned as a 0-1 percentile.
+        try:
+            if "atr_14" in tech_df.columns and len(tech_df) > 30:
+                atr_hist = tech_df["atr_14"].dropna().tail(252)
+                if len(atr_hist) >= 20 and atr_14 > 0:
+                    pct = float((atr_hist <= atr_14).sum()) / float(len(atr_hist))
+                    raw["atr_percentile_252"] = round(max(0.0, min(1.0, pct)), 4)
+                else:
+                    raw["atr_percentile_252"] = 0.5
+            else:
+                raw["atr_percentile_252"] = 0.5
+        except Exception:
+            raw["atr_percentile_252"] = 0.5
+
+        # banks_above_50dma_pct: breadth — fraction of the 5-bank universe
+        # currently trading above its 50-day moving average. >0.7 = strong
+        # broad uptrend; <0.3 = broad weakness. Fetched via PriceFetcher per
+        # bank with a short cache so a 15-min cycle hits yfinance at most once.
+        try:
+            raw["banks_above_50dma_pct"] = self._universe_above_50dma()
+        except Exception as _e:
+            logger.debug(f"banks_above_50dma_pct fetch failed: {_e}")
+            raw["banks_above_50dma_pct"] = 0.5
 
         # Sanitise entire dict — no NaN, no inf
         raw = {
@@ -638,17 +796,22 @@ class FeatureBuilder:
                 "india_vix":             float(macro_raw.get("india_vix_level", 15.0)),
             },
 
-            # Regime context — gate 1 in signal_engine
-            "regime": {
-                "regime":       regime_result.get("regime", "UNKNOWN"),
-                "stability":    float(regime_result.get("stability", 0.5)),
-                "trade_long":   bool(regime_result.get("trade_long", True)),
-                "trade_short":  bool(regime_result.get("trade_short", False)),
-                "position_mult":float(regime_result.get("position_mult", 1.0)),
-                "description":  regime_result.get("description", ""),
-                "regime_stable":regime_trend.get("stable", True),
+            # Regime context — gate 1 in signal_engine.
+            # RegimeDetector.detect() returns trade_long/trade_short under a
+            # nested "rules" dict (regime_detector.py:451-462); reading them at
+            # the top level silently fell through to defaults (trade_long=True,
+            # trade_short=False) regardless of the actual regime — making BEAR
+            # appear to allow LONGs. Read from the rules sub-dict explicitly.
+            "regime": (lambda _r: {
+                "regime":        regime_result.get("regime", "UNKNOWN"),
+                "stability":     float(regime_result.get("stability", 0.5)),
+                "trade_long":    bool(_r.get("trade_long", False)),
+                "trade_short":   bool(_r.get("trade_short", False)),
+                "position_mult": float(_r.get("position_mult", 1.0)),
+                "description":   _r.get("description", ""),
+                "regime_stable": regime_trend.get("stable", True),
                 "regime_changes":regime_trend.get("changes", 0),
-            },
+            })(regime_result.get("rules", {})),
 
             # S/R levels — gate 5 in signal_engine + exit engine targets
             "sr_levels": {
@@ -862,25 +1025,31 @@ class FeatureBuilder:
 
     def _compute_bulk_regime_features(self, tech_df: pd.DataFrame) -> pd.DataFrame:
         """
-        Compute per-bar regime features from already-built technical indicators.
-        Purely backward-looking — no HMM, no future data.
-
-        Rule-based classification:
-        - BEAR: ADX > 22 AND EMA spread < -0.01 AND 20d return < 0
-        - BULL: ADX > 22 AND EMA spread > +0.01 AND 20d return > 0
-        - HIGH_VOL: ADX > 30 AND |5d return| > 2.5%
-        - CHOPPY: otherwise
-
-        Stability = rolling 10-bar fraction in same regime (backward).
+        Per-bar regime features for training. Uses the SAME classifier as the
+        live override (`classify_regime_row`) — including the |EMA spread|>1.5%
+        override path — so training labels match what the model will see at
+        inference. Stability is a rolling 10-bar fraction of the dominant
+        regime, computed backward-only (no future leak).
         """
-        adx      = tech_df.get("adx",          pd.Series(20.0, index=tech_df.index))
+        adx_s    = tech_df.get("adx",          pd.Series(20.0, index=tech_df.index))
         ema_sp   = tech_df.get("ema_spread",    pd.Series(0.0,  index=tech_df.index))
-        ret20    = tech_df.get("returns_20d",   pd.Series(0.0,  index=tech_df.index))
         ret5     = tech_df.get("returns_5d",    pd.Series(0.0,  index=tech_df.index))
 
-        bear = ((adx > 22) & (ema_sp < -0.01) & (ret20 < 0)).astype(int)
-        bull = ((adx > 22) & (ema_sp >  0.01) & (ret20 > 0)).astype(int)
-        hvol = ((adx > 30) & (ret5.abs() > 0.025)).astype(int)
+        # Vectorised version of classify_regime_row — same thresholds, same
+        # override path. If you change one, change the other. Past returns
+        # (returns_20d) intentionally REMOVED from the bull/bear direction —
+        # see classify_regime_row docstring (audit CR-1A) for the rationale.
+        ema_bull_override = (ema_sp >  _REGIME_EMA_OVERRIDE)
+        ema_bear_override = (ema_sp < -_REGIME_EMA_OVERRIDE)
+        bear = (
+            ((adx_s > _REGIME_ADX_TREND_MIN) & (ema_sp < -_REGIME_EMA_TREND_MIN))
+            | ema_bear_override
+        ).astype(int)
+        bull = (
+            ((adx_s > _REGIME_ADX_TREND_MIN) & (ema_sp >  _REGIME_EMA_TREND_MIN))
+            | ema_bull_override
+        ).astype(int)
+        hvol = ((adx_s > _REGIME_ADX_HVOL_MIN) & (ret5.abs() > _REGIME_HVOL_R5_MIN)).astype(int)
         chop = (1 - bear - bull - hvol).clip(0, 1)
 
         # Stability: rolling 10-bar majority regime fraction (raw=True → numpy array)
@@ -925,6 +1094,8 @@ class FeatureBuilder:
         """
         Assess what fraction of numeric features are non-zero.
         Detects data source failures early.
+        Honors `macro_stale=1` by floor-clamping quality to DEGRADED so
+        H1's +5pp Gate 6 boost engages when global_snapshots is stale.
         """
         numeric = {k: v for k, v in raw.items()
                    if isinstance(v, (int, float, np.floating, np.integer))}
@@ -938,11 +1109,14 @@ class FeatureBuilder:
             "DEGRADED"  if miss < 0.50 else
             "POOR"
         )
+        if int(raw.get("macro_stale", 0)) == 1 and quality in ("EXCELLENT", "GOOD"):
+            quality = "DEGRADED"
         return {
             "total_features": total,
             "zero_features":  zeros,
             "missing_pct":    round(miss, 3),
             "quality":        quality,
+            "macro_stale":    int(raw.get("macro_stale", 0)),
         }
 
     def _save_snapshot(self, result: Dict) -> None:
@@ -959,11 +1133,12 @@ class FeatureBuilder:
             conn = sqlite3.connect(self.db_path)
             conn.execute("""
                 INSERT INTO feature_snapshots
-                (signal_uuid, built_at, build_time_sec, data_quality,
+                (ticker, signal_uuid, built_at, build_time_sec, data_quality,
                  n_features, current_price, regime, risk_allowed,
                  feature_values)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
             """, (
+                self.ticker,
                 result.get("signal_uuid", ""),
                 result["built_at"],
                 result["build_time_sec"],
@@ -980,12 +1155,19 @@ class FeatureBuilder:
             logger.debug(f"Snapshot save skipped: {e}")
 
     def _setup_db(self) -> None:
-        """Create feature_snapshots table if not present."""
+        """
+        Safety net for `feature_snapshots` only — FeatureBuilder owns this audit
+        table. All trading tables (`open_trades`, `closed_trades`,
+        `signal_outcomes`, `macro_data`) are owned by `database/db_setup.py`;
+        creating them here from a stale schema corrupted production schemas
+        when callers hit FeatureBuilder before `DatabaseSetup.setup_all()`.
+        """
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS feature_snapshots (
                     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker         TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
                     signal_uuid    TEXT,
                     built_at       TEXT,
                     build_time_sec REAL,
@@ -997,52 +1179,17 @@ class FeatureBuilder:
                     feature_values TEXT
                 )
             """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS signal_outcomes (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    signal      TEXT,
-                    outcome     TEXT,
-                    pnl_pct     REAL,
-                    pnl_amount  REAL,
-                    created_at  TEXT
+            # Migrate legacy table missing ticker column.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(feature_snapshots)")}
+            if "ticker" not in cols:
+                conn.execute(
+                    "ALTER TABLE feature_snapshots ADD COLUMN "
+                    "ticker TEXT NOT NULL DEFAULT 'HDFCBANK.NS'"
                 )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS open_trades (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    signal      TEXT,
-                    entry_price REAL,
-                    stop_price  REAL,
-                    target_price REAL,
-                    risk_amount REAL,
-                    status      TEXT DEFAULT 'OPEN',
-                    opened_at   TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS closed_trades (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    signal       TEXT,
-                    entry_price  REAL,
-                    exit_price   REAL,
-                    pnl_amount   REAL,
-                    pnl_pct      REAL,
-                    close_date   TEXT,
-                    status       TEXT DEFAULT 'CLOSED'
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS macro_data (
-                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                    rbi_rate      REAL,
-                    credit_growth REAL,
-                    fetched_at    TEXT
-                )
-            """)
             conn.commit()
             conn.close()
         except Exception as e:
-            logger.warning(f"DB setup warning: {e}")
+            logger.warning(f"feature_snapshots safety-net setup: {e}")
 
     def _empty_result(self) -> Dict:
         """Safe empty result when price data fetch fails."""

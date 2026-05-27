@@ -77,7 +77,10 @@ class DatabaseSetup:
             ("signal_outcomes",   "ticker", "TEXT DEFAULT 'HDFCBANK.NS'"),
             ("feature_snapshots", "ticker", "TEXT DEFAULT 'HDFCBANK.NS'"),
             ("options_snapshots", "ticker", "TEXT DEFAULT 'HDFCBANK.NS'"),
-            ("fundamentals",      "ticker", "TEXT DEFAULT 'HDFCBANK.NS'"),
+            # fundamentals.ticker is now a base column + UNIQUE — see
+            # _migrate_fundamentals_table for legacy rebuild.
+            ("regime_snapshots",  "ticker", "TEXT DEFAULT 'HDFCBANK.NS'"),
+            ("bse_announcements", "ticker", "TEXT DEFAULT 'HDFCBANK.NS'"),
             # Full feature snapshot for win/loss attribution
             ("feature_snapshots", "feature_values", "TEXT"),
             # RBI rate effective date — keyed seed for macro_data (P2)
@@ -93,6 +96,58 @@ class DatabaseSetup:
             if col not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {coltype}")
                 logger.info(f"Migrated: {table}.{col} added")
+
+    def _migrate_fundamentals_table(self, conn: sqlite3.Connection) -> None:
+        """Rebuild legacy `fundamentals` (no UNIQUE(ticker, fetched_at)) if needed.
+
+        Legacy table: no ticker column, no UNIQUE. New shape: ticker NOT NULL,
+        UNIQUE(ticker, fetched_at). Backfills ticker='HDFCBANK.NS' on copy.
+        """
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(fundamentals)")}
+        if not cols:
+            return  # CREATE just ran — already new shape
+
+        has_unique = False
+        for idx in conn.execute("PRAGMA index_list(fundamentals)").fetchall():
+            idx_name = idx[1]
+            idx_cols = [c[2] for c in conn.execute(f"PRAGMA index_info('{idx_name}')").fetchall()]
+            if set(idx_cols) == {"ticker", "fetched_at"}:
+                has_unique = True
+                break
+        if "ticker" in cols and has_unique:
+            return  # already correct shape
+
+        logger.info("Rebuilding fundamentals to add UNIQUE(ticker, fetched_at)")
+        conn.execute("ALTER TABLE fundamentals RENAME TO fundamentals_old")
+        conn.execute("""
+            CREATE TABLE fundamentals (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker          TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
+                nim             REAL,  npa_gross      REAL,
+                npa_net         REAL,  casa_ratio      REAL,
+                loan_growth     REAL,  deposit_growth  REAL,
+                car             REAL,  pcr             REAL,
+                roe             REAL,  roa             REAL,
+                cost_to_income  REAL,  pb_ratio        REAL,
+                pe_ratio        REAL,  eps_surprise    REAL,
+                fetched_at      TEXT,
+                UNIQUE(ticker, fetched_at)
+            )
+        """)
+        old_cols = {row[1] for row in conn.execute("PRAGMA table_info(fundamentals_old)")}
+        ticker_expr = "COALESCE(ticker, 'HDFCBANK.NS')" if "ticker" in old_cols else "'HDFCBANK.NS'"
+        conn.execute(f"""
+            INSERT OR IGNORE INTO fundamentals
+            (ticker, nim, npa_gross, npa_net, casa_ratio, loan_growth,
+             deposit_growth, car, pcr, roe, roa, cost_to_income,
+             pb_ratio, pe_ratio, eps_surprise, fetched_at)
+            SELECT {ticker_expr}, nim, npa_gross, npa_net, casa_ratio, loan_growth,
+                   deposit_growth, car, pcr, roe, roa, cost_to_income,
+                   pb_ratio, pe_ratio, eps_surprise, fetched_at
+            FROM fundamentals_old
+        """)
+        conn.execute("DROP TABLE fundamentals_old")
+        logger.info("fundamentals migrated to UNIQUE(ticker, fetched_at)")
 
     def verify(self) -> dict:
         """Verify all tables exist and return row counts."""
@@ -136,24 +191,69 @@ class DatabaseSetup:
             )
         """)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS bse_announcements (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                title            TEXT    UNIQUE,
-                description      TEXT,
-                category         TEXT,
-                source           TEXT,
-                announcement_date TEXT,
-                is_high_priority INTEGER DEFAULT 0,
-                llm_analyzed     INTEGER DEFAULT 0,
-                llm_impact_score REAL    DEFAULT 0.0,
-                created_at       TEXT
-            )
-        """)
+        # bse_announcements — multi-bank scoped.
+        # Old shape: UNIQUE(title) collapses two banks' filings with the same title.
+        # New shape: UNIQUE(ticker, title, announcement_date). If an old single-
+        # column UNIQUE table is present, migrate by copying into a new table.
+        old_idx = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='bse_announcements' AND name='sqlite_autoindex_bse_announcements_1'"
+        ).fetchone()
+        if old_idx:
+            conn.execute("ALTER TABLE bse_announcements RENAME TO bse_announcements_old")
+            conn.execute("""
+                CREATE TABLE bse_announcements (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker            TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
+                    title             TEXT,
+                    description       TEXT,
+                    category          TEXT,
+                    source            TEXT,
+                    announcement_date TEXT,
+                    is_high_priority  INTEGER DEFAULT 0,
+                    llm_analyzed      INTEGER DEFAULT 0,
+                    llm_impact_score  REAL    DEFAULT 0.0,
+                    created_at        TEXT,
+                    UNIQUE(ticker, title, announcement_date)
+                )
+            """)
+            try:
+                conn.execute("""
+                    INSERT OR IGNORE INTO bse_announcements
+                    (ticker, title, description, category, source,
+                     announcement_date, is_high_priority,
+                     llm_analyzed, llm_impact_score, created_at)
+                    SELECT 'HDFCBANK.NS', title, description, category, source,
+                           announcement_date, is_high_priority,
+                           llm_analyzed, llm_impact_score, created_at
+                    FROM bse_announcements_old
+                """)
+            except Exception as e:
+                logger.warning(f"bse_announcements legacy copy skipped: {e}")
+            conn.execute("DROP TABLE bse_announcements_old")
+            logger.info("bse_announcements migrated to UNIQUE(ticker, title, announcement_date)")
+        else:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS bse_announcements (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker            TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
+                    title             TEXT,
+                    description       TEXT,
+                    category          TEXT,
+                    source            TEXT,
+                    announcement_date TEXT,
+                    is_high_priority  INTEGER DEFAULT 0,
+                    llm_analyzed      INTEGER DEFAULT 0,
+                    llm_impact_score  REAL    DEFAULT 0.0,
+                    created_at        TEXT,
+                    UNIQUE(ticker, title, announcement_date)
+                )
+            """)
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS options_snapshots (
                 id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker             TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
                 pcr                REAL,
                 pcr_roc            REAL,
                 max_pain           REAL,
@@ -292,9 +392,13 @@ class DatabaseSetup:
             )
         """)
 
+        # fundamentals — multi-bank scoped with UNIQUE(ticker, fetched_at) so
+        # Sunday refresh re-runs UPSERT cleanly. Legacy table (no ticker column,
+        # no UNIQUE) is rebuilt below in _migrate_fundamentals_table.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS fundamentals (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker          TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
                 nim             REAL,  npa_gross      REAL,
                 npa_net         REAL,  casa_ratio      REAL,
                 loan_growth     REAL,  deposit_growth  REAL,
@@ -302,13 +406,16 @@ class DatabaseSetup:
                 roe             REAL,  roa             REAL,
                 cost_to_income  REAL,  pb_ratio        REAL,
                 pe_ratio        REAL,  eps_surprise    REAL,
-                fetched_at      TEXT
+                fetched_at      TEXT,
+                UNIQUE(ticker, fetched_at)
             )
         """)
+        self._migrate_fundamentals_table(conn)
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS regime_snapshots (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker        TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
                 regime        TEXT,
                 stability     REAL,
                 bull_prob     REAL,
@@ -386,9 +493,22 @@ class DatabaseSetup:
     def _system_tables(self, conn: sqlite3.Connection) -> None:
         """System monitoring and audit tables."""
 
+        # gate_results — per-ticker latest snapshot of the 6-gate pipeline.
+        # One row per ticker (UPSERT on each signal cycle); dashboard reads
+        # straight from here instead of `logs/last_gate_results_*.json`.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS gate_results (
+                ticker        TEXT    NOT NULL PRIMARY KEY,
+                gate_results  TEXT,
+                regime        TEXT,
+                written_at    TEXT    NOT NULL
+            )
+        """)
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS feature_snapshots (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker         TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
                 signal_uuid    TEXT,
                 built_at       TEXT,
                 build_time_sec REAL,
@@ -484,6 +604,12 @@ class DatabaseSetup:
             # Earnings calendar
             ("idx_earn_cal_date",      "earnings_calendar",     "result_date ASC"),
             ("idx_earn_cal_ticker",    "earnings_calendar",     "ticker, result_date ASC"),
+            # Per-ticker hot paths (added 2026-05-26 with multi-bank scoping)
+            ("idx_options_ticker_fetched", "options_snapshots", "ticker, fetched_at DESC"),
+            ("idx_feature_ticker_built",   "feature_snapshots", "ticker, built_at DESC"),
+            ("idx_regime_ticker_detected", "regime_snapshots",  "ticker, detected_at DESC"),
+            ("idx_bse_ticker_created",     "bse_announcements", "ticker, created_at DESC"),
+            ("idx_fundamentals_ticker_fetched", "fundamentals", "ticker, fetched_at DESC"),
         ]
         for idx_name, table, cols in indexes:
             conn.execute(f"""

@@ -35,8 +35,11 @@ class RiskFeatures:
     to calculate actual share quantity for each trade.
     """
 
-    MONTHLY_HALT_THRESHOLD = -0.06   # -6% → stop trading this month
-    MONTHLY_REDUCE_THRESHOLD = -0.04  # -4% → reduce to 50% size
+    # Legacy fallback thresholds — kept for callsites that don't pass
+    # capital. Live path reads mode-aware values from `CircuitBreaker.THRESHOLDS`
+    # so the reduce/halt levels stay in lock-step across the two modules.
+    MONTHLY_HALT_THRESHOLD = -0.06
+    MONTHLY_REDUCE_THRESHOLD = -0.04
 
     def extract(self,
                 capital:           float,
@@ -75,16 +78,42 @@ class RiskFeatures:
         else:
             heat_mult = 1.0
 
-        # ── Monthly drawdown ──────────────────────────────────────
-        monthly_dd = self._get_monthly_drawdown(db_path, capital)
-        monthly_flag = int(monthly_dd < self.MONTHLY_HALT_THRESHOLD)
+        # ── Monthly drawdown (mode-aware thresholds) ──────────────
+        # Mirror CircuitBreaker.THRESHOLDS so the reduce/halt levels stay
+        # in lock-step. Without this, RiskFeatures could halt at -6% while
+        # CircuitBreaker only paused, or vice-versa — two systems disagreeing
+        # is worse than either.
+        try:
+            from risk.circuit_breaker import CircuitBreaker as _CB
+            _cb_thr      = _CB.THRESHOLDS.get(cap_mode, _CB.THRESHOLDS["FULL"])
+            halt_thresh  = -abs(_cb_thr["halt"])
+            reduce_thresh= -abs(_cb_thr["pause"])
+        except Exception:
+            halt_thresh   = self.MONTHLY_HALT_THRESHOLD
+            reduce_thresh = self.MONTHLY_REDUCE_THRESHOLD
 
-        if monthly_dd < self.MONTHLY_HALT_THRESHOLD:
+        monthly_dd   = self._get_monthly_drawdown(db_path, capital)
+        monthly_flag = int(monthly_dd < halt_thresh)
+
+        if monthly_dd < halt_thresh:
             dd_mult = 0.0    # halt — circuit breaker triggered
-        elif monthly_dd < self.MONTHLY_REDUCE_THRESHOLD:
+        elif monthly_dd < reduce_thresh:
             dd_mult = 0.5
         else:
             dd_mult = 1.0
+
+        # ── Persisted circuit-breaker state ───────────────────────
+        # Gate 6 reads `trading_allowed` from here. A breach detected in any
+        # cycle persists in `circuit_breaker_state`, so even cycles where the
+        # monthly DD math hasn't recomputed yet still see the halt.
+        try:
+            from risk.circuit_breaker import CircuitBreaker as _CB2
+            _cb_state = _CB2(db_path).get_current_state()
+            if _cb_state.get("level") in ("PAUSE", "HALT"):
+                dd_mult = 0.0
+                monthly_flag = 1
+        except Exception:
+            _cb_state = {"level": "OK"}
 
         # ── Anomaly ───────────────────────────────────────────────
         anomaly_mult = float(
@@ -159,6 +188,10 @@ class RiskFeatures:
 
             # Reward/Risk
             "reward_risk_ratio":     round(reward_risk, 4),
+
+            # Circuit-breaker passthrough (DB-persisted level)
+            "circuit_breaker_level": _cb_state.get("level", "OK"),
+            "circuit_breaker_reason":_cb_state.get("reason", ""),
 
             # MASTER OUTPUT — used directly by risk engine
             "final_size_mult":       final_mult,

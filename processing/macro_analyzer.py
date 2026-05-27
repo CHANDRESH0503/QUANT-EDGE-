@@ -63,6 +63,14 @@ class MacroAnalyzer:
         macro_score = self._calculate_macro_score(rbi, vix, currency)
         event_mult  = self._event_proximity_mult(rbi)
 
+        # Freshness flag — if global_snapshots is stale (>30h since last fetch)
+        # the macro context should be treated with reduced trust by Gate 6.
+        try:
+            from data.global_fetcher import GlobalFetcher
+            macro_stale = GlobalFetcher(self.db_path).is_stale(max_age_hours=30)
+        except Exception:
+            macro_stale = False
+
         return {
             # RBI calendar
             **rbi,
@@ -79,6 +87,8 @@ class MacroAnalyzer:
             "macro_signal":       self._score_to_signal(macro_score),
             # Event-aware sizing
             "macro_event_mult":   event_mult,
+            # Freshness
+            "macro_stale":        int(bool(macro_stale)),
         }
 
     def _event_proximity_mult(self, rbi: Dict) -> float:

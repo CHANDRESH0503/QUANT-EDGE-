@@ -169,7 +169,7 @@ def backfill(start: str, end: str, db_path: str = "database/trading.db") -> int:
     """Backfill options_snapshots from NSE F&O bhavcopy zips."""
     from data.options_fetcher import OptionsFetcher
 
-    of = OptionsFetcher(db_path=db_path)
+    of = OptionsFetcher(db_path=db_path, ticker="HDFCBANK.NS")
 
     start_dt = datetime.strptime(start, "%Y-%m-%d")
     end_dt   = datetime.strptime(end,   "%Y-%m-%d")

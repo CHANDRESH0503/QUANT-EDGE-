@@ -37,7 +37,7 @@ class DriftMonitor:
        Rolling 30-day Brier score vs training Brier.
        If Brier worsens > 20%, model confidence is no longer trustworthy.
 
-    Used by task_runner in the 18:00 EOD report.
+    Used by orchestrator in the 18:00 EOD report.
     """
 
     PSI_WARN  = 0.10

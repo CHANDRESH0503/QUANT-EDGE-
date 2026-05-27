@@ -148,7 +148,7 @@ class EarningsPredictor:
 
         Priority order:
         1. earnings_calendar DB table (populated by BSEFetcher.sync_earnings_calendar)
-        2. Hardcoded HDFC_EARNINGS_DATES fallback list
+        2. BANK_CONFIG earnings_dates fallback list (`self._earnings_dates`)
         3. Default 90 days (safe — no earnings restriction applied)
         """
         today = datetime.now().date()

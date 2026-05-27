@@ -94,7 +94,7 @@ def mode_setup() -> None:
     mode_train(force=True, ticker=TradingConfig.TICKER)
 
     logger.info("=" * 55)
-    logger.info("Setup complete. Run: python main.py to start the system.")
+    logger.info("Setup complete. Run: python main.py to start the multi-bank system.")
     logger.info("=" * 55)
 
 
@@ -295,12 +295,11 @@ def mode_dashboard() -> None:
         print(f"  {src:15}: {age_str:12} {status}")
 
 
-def mode_run(ticker: str = None) -> None:
+def mode_run() -> None:
     """
-    Start the live task runner — runs forever.
-    This is the main production mode.
+    Start the live multi-bank orchestrator — runs forever.
+    Boots MultiBankOrchestrator across all 5 banks in TradingConfig.UNIVERSE.
     """
-    effective_ticker = ticker or TradingConfig.TICKER
     print_config_summary()
 
     # Validate credentials
@@ -317,44 +316,46 @@ def mode_run(ticker: str = None) -> None:
     from database.db_setup import DatabaseSetup
     DatabaseSetup(PathConfig.DB_PATH).setup_all()
 
-    # Load models (train if none exist)
+    # Load models for every bank (train if any are missing)
     from models.train_all import ModelTrainer
-    trainer = ModelTrainer(
-        ticker  = effective_ticker,
-        capital = TradingConfig.STARTING_CAPITAL,
-        db_path = PathConfig.DB_PATH,
-    )
-    loaded = trainer.load_all()
-    not_loaded = [k for k, v in loaded.items() if not v]
+    missing_any = False
+    for t in TradingConfig.UNIVERSE:
+        trainer = ModelTrainer(
+            ticker  = t,
+            capital = TradingConfig.STARTING_CAPITAL,
+            db_path = PathConfig.DB_PATH,
+        )
+        loaded = trainer.load_all()
+        not_loaded = [k for k, v in loaded.items() if not v]
+        if not_loaded:
+            missing_any = True
+            logger.warning(f"[{t}] Models not found: {not_loaded}")
 
-    if not_loaded:
-        logger.warning(f"Models not found: {not_loaded}")
-        logger.info(f"Run: python main.py --mode=train --ticker={effective_ticker}  to train models first")
+    if missing_any:
+        logger.info("Run: python main.py --mode=train  to retrain all banks first")
         logger.info("Or:  python main.py --mode=setup  for full first-time setup")
-
-        response = input("\nTrain models now? This takes 15–30 min [y/N]: ").strip().lower()
+        response = input("\nTrain missing models now? This takes 15–30 min [y/N]: ").strip().lower()
         if response == "y":
-            mode_train(force=True, ticker=effective_ticker)
+            mode_train(force=True)
         else:
-            logger.info("Starting with no models — signals will be FLAT until models are trained")
+            logger.info("Starting with missing models — affected banks will emit FLAT until trained")
 
-    # Start the task runner
-    from scheduler.task_runner import TaskRunner
-    runner = TaskRunner(
-        ticker  = effective_ticker,
+    from orchestrator import MultiBankOrchestrator
+    orch = MultiBankOrchestrator(
+        tickers = list(TradingConfig.UNIVERSE),
         capital = TradingConfig.STARTING_CAPITAL,
         db_path = PathConfig.DB_PATH,
     )
 
     logger.info("=" * 55)
-    logger.info("QUANT EDGE LIVE — Running")
-    logger.info(f"Ticker:  {effective_ticker}")
+    logger.info("QUANT EDGE LIVE — MultiBankOrchestrator")
+    logger.info(f"Banks:   {', '.join(TradingConfig.UNIVERSE)}")
     logger.info(f"Capital: ₹{TradingConfig.STARTING_CAPITAL:,.0f}")
     logger.info(f"Time:    {datetime.now().strftime('%d %b %Y %H:%M IST')}")
     logger.info("=" * 55)
     logger.info("Press Ctrl+C to stop")
 
-    runner.start()
+    orch.start()
 
 
 # ════════════════════════════════════════════════════════════════
@@ -367,20 +368,21 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Modes:
-  run        Start live trading system (default)
+  run        Start live multi-bank orchestrator (default)
   setup      First-time setup: DB, dirs, initial training
-  train      Retrain all 4 ML models
-  signal     Run one signal cycle and print result
+  train      Retrain ML models (per-ticker via --ticker)
+  signal     Run one signal cycle for a single ticker
   backtest   Full backtest + walk-forward validation
   dashboard  Print current portfolio status
 
 Examples:
-  python main.py                    # Start live system
-  python main.py --mode=setup       # First-time setup
-  python main.py --mode=signal      # Single signal test
-  python main.py --mode=train       # Retrain models
-  python main.py --mode=backtest    # Backtest analysis
-  python main.py --mode=dashboard   # Portfolio status
+  python main.py                          # Start live 5-bank system
+  python main.py --mode=setup             # First-time setup
+  python main.py --mode=signal --ticker=ICICIBANK.NS
+  python main.py --mode=train             # Retrain HDFCBANK (default)
+  python main.py --mode=train --ticker=AXISBANK.NS
+  python main.py --mode=backtest          # Backtest analysis
+  python main.py --mode=dashboard         # Portfolio status
         """,
     )
     parser.add_argument(
@@ -432,7 +434,7 @@ def main() -> None:
         elif args.mode == "dashboard":
             mode_dashboard()
         else:
-            mode_run(ticker=effective_ticker)
+            mode_run()
 
     except KeyboardInterrupt:
         logger.info("\nQuant Edge stopped by user")

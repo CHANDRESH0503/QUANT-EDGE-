@@ -108,6 +108,90 @@ class GlobalFetcher:
         """Get most recent global snapshot from DB (no API call)."""
         return self._get_latest_from_db()
 
+    def get_row_count(self) -> int:
+        """How many global snapshots are in the DB? Used by bootstrap check."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            n    = conn.execute("SELECT COUNT(*) FROM global_snapshots").fetchone()[0]
+            conn.close()
+            return int(n or 0)
+        except Exception:
+            return 0
+
+    def is_stale(self, max_age_hours: float = 30) -> bool:
+        """True if the most recent global snapshot is older than `max_age_hours`."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            row  = conn.execute("SELECT MAX(fetched_at) FROM global_snapshots").fetchone()
+            conn.close()
+            if not row or not row[0]:
+                return True
+            last = datetime.fromisoformat(str(row[0])[:19])
+            return (datetime.now() - last).total_seconds() > max_age_hours * 3600
+        except Exception:
+            return True
+
+    def bootstrap_history(self, days: int = 30) -> int:
+        """
+        Synthesise `days` of historical snapshots from the existing 30-day
+        price series we already fetch. Lookahead-safe: each synthetic row
+        slices the series at index `[:-offset]` so day T's snapshot only
+        sees prices ≤ day T.
+
+        Called on orchestrator boot when row count < 7. Returns rows added.
+        """
+        prices = self._fetch_all_prices()
+        if not prices:
+            logger.warning("bootstrap_history: no price data fetched")
+            return 0
+
+        # Pick the shortest series as our anchor — every other series gets
+        # truncated to match so all rows compare apples-to-apples.
+        min_len = min(len(s) for s in prices.values())
+        if min_len < 7:
+            logger.warning(
+                f"bootstrap_history: only {min_len} days of price history — "
+                f"need ≥7. Skipping bootstrap."
+            )
+            return 0
+
+        # Read current set of fetched_at dates so we don't dupe.
+        existing_dates = set()
+        try:
+            conn = sqlite3.connect(self.db_path)
+            for (d,) in conn.execute(
+                "SELECT substr(fetched_at, 1, 10) FROM global_snapshots"
+            ).fetchall():
+                existing_dates.add(d)
+            conn.close()
+        except Exception:
+            pass
+
+        added = 0
+        # Walk backward — most recent first, stopping when we have enough.
+        for offset in range(0, min(days, min_len - 6)):
+            sliced = {k: s.iloc[: len(s) - offset] for k, s in prices.items()}
+            try:
+                anchor_date = sliced[next(iter(sliced))].index[-1]
+            except Exception:
+                continue
+            date_str = str(anchor_date)[:10]
+            if date_str in existing_dates:
+                continue
+
+            features = self._calculate_features(sliced)
+            features["verdict"]    = self._generate_verdict(features)
+            features["fetched_at"] = f"{date_str} 18:00:00"  # synthetic EOD
+            try:
+                self._save_snapshot(features)
+                added += 1
+                existing_dates.add(date_str)
+            except Exception as e:
+                logger.warning(f"bootstrap_history insert for {date_str}: {e}")
+
+        logger.info(f"GlobalFetcher.bootstrap_history: added {added} rows")
+        return added
+
     def get_intraday_bias(self) -> str:
         """
         Simple directional bias for intraday model.

@@ -130,6 +130,7 @@ class FundamentalProcessor:
             # Composite
             "fundamental_grade":  grade,
             "fundamental_score":  grade_score,    # -1 to +1 for ML
+            "fundamentals_missing": 0,
         }
 
     # ─────────────────────────────────────────────────────────────
@@ -339,7 +340,7 @@ class FundamentalProcessor:
     def _save_fundamentals(self, data: Dict) -> None:
         conn = self._connect()
         conn.execute("""
-            INSERT INTO fundamentals
+            INSERT OR REPLACE INTO fundamentals
             (ticker, nim, npa_gross, npa_net, casa_ratio, loan_growth,
              deposit_growth, car, pcr, roe, roa, cost_to_income,
              pb_ratio, pe_ratio, eps_surprise, fetched_at)
@@ -366,11 +367,17 @@ class FundamentalProcessor:
             return 0.0
 
     def _empty_features(self) -> Dict:
-        # No DB data yet — use sector-typical Indian private bank defaults
-        # so Gate 2 Check 5 doesn't spuriously block while DB is empty.
-        # "UNKNOWN" was previously returned here, which always failed the gate.
+        # No DB rows — we used to return sector defaults here labelled GOOD,
+        # which let Gate 2 pass even when fundamentals were *entirely* missing.
+        # Now we return the same sector defaults BUT label the grade as
+        # "DEFAULTED" so:
+        #   - Gate 2 Check 5 (`fund_ok = grade not in POOR/UNKNOWN`) still passes
+        #     for swing/intraday (don't paralyse trading on a fresh DB)
+        #   - But Gate 2 also adds a +1pp conf bump requirement specifically
+        #     for `positional` (see gate2_rule_filter.py) since long-hold trades
+        #     are most exposed to fundamental surprises
         defaults = {"nim": 3.8, "npa_gross": 1.3, "roe": 16.0, "casa_ratio": 45.0}
-        grade, score = self._grade_fundamentals(defaults, 0.0, 0.0)
+        _, score = self._grade_fundamentals(defaults, 0.0, 0.0)
         return {
             "nim": 0, "nim_trend": 0, "npa_gross": 0, "npa_net": 0,
             "npa_trend": 0, "casa_ratio": 0, "casa_trend": 0,
@@ -378,7 +385,9 @@ class FundamentalProcessor:
             "car": 0, "pcr": 0, "roe": 0, "roa": 0, "cost_to_income": 0,
             "pb_ratio": 0, "pe_ratio": 0, "pb_vs_5yr_avg": 1.0,
             "eps_surprise": 0, "beat_streak": 0,
-            "fundamental_grade": grade, "fundamental_score": score,
+            "fundamental_grade": "DEFAULTED",
+            "fundamental_score": score,
+            "fundamentals_missing": 1,
         }
 
     def _connect(self) -> sqlite3.Connection:
@@ -387,10 +396,13 @@ class FundamentalProcessor:
         return c
 
     def _setup_db(self) -> None:
+        # Safety-net only — `database.db_setup.DatabaseSetup` is the authoritative
+        # schema owner. Shape must match (ticker NOT NULL, UNIQUE(ticker, fetched_at)).
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS fundamentals (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker          TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
                 nim             REAL, npa_gross      REAL,
                 npa_net         REAL, casa_ratio      REAL,
                 loan_growth     REAL, deposit_growth  REAL,
@@ -398,7 +410,8 @@ class FundamentalProcessor:
                 roe             REAL, roa             REAL,
                 cost_to_income  REAL, pb_ratio        REAL,
                 pe_ratio        REAL, eps_surprise     REAL,
-                fetched_at      TEXT
+                fetched_at      TEXT,
+                UNIQUE(ticker, fetched_at)
             )
         """)
         conn.commit()

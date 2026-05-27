@@ -350,9 +350,6 @@ class LogConfig:
 class CalendarConfig:
     """NSE holidays and important dates."""
 
-    # HDFC Bank quarterly result dates — reference BANK_CONFIG as single source of truth
-    HDFC_EARNINGS_DATES = BANK_CONFIG["HDFCBANK.NS"]["earnings_dates"]
-
     # RBI MPC meeting dates 2026
     RBI_MPC_DATES = [
         "2026-02-07", "2026-04-09", "2026-06-06",

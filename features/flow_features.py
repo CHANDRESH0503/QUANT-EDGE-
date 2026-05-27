@@ -34,6 +34,11 @@ class FlowFeatures:
         fii_signal= float(fii_features.get("fii_signal", 0))   # already -1 to +1
         bulk_net  = float(fii_features.get("bulk_net_cr", 0))
 
+        # Alpha: fii_flow_surprise — z-score from fii_fetcher (-3..+3 raw).
+        # Normalised here to roughly [-1, +1] for ML by /3.
+        fii_surprise_raw = float(fii_features.get("fii_flow_surprise", 0))
+        fii_surprise     = self._clip(fii_surprise_raw / 3.0)
+
         # Normalise FII flow — ±5000 Cr = ±1.0
         fii_5d_norm= self._clip(fii_5d / 5000)
         dii_3d_norm= self._clip(dii_3d / 2000)
@@ -66,6 +71,7 @@ class FlowFeatures:
         return {
             "fii_5d_norm":         round(fii_5d_norm, 4),
             "fii_signal":          round(fii_signal, 4),
+            "fii_flow_surprise":   round(fii_surprise, 4),  # alpha 2026-05-26
             "dii_3d_norm":         round(dii_3d_norm, 4),
             "bulk_deal_norm":      round(bulk_norm, 4),
             "flow_confluence":     round(conf_score, 4),

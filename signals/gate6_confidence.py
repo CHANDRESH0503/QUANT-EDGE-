@@ -43,12 +43,13 @@ class Gate6Confidence:
 
     def check(
         self,
-        primary_conf:  float,
-        alignment:     str,
-        capital_mode:  str,
-        risk_context:  Dict,
-        model_type:    str = "swing",
-        skip_alignment:bool = False,
+        primary_conf:        float,
+        alignment:           str,
+        capital_mode:        str,
+        risk_context:        Dict,
+        model_type:          str   = "swing",
+        skip_alignment:      bool  = False,
+        data_quality_boost:  float = 0.0,
     ) -> Tuple[bool, Dict]:
         """
         Final confidence and capital mode gate.
@@ -63,12 +64,26 @@ class Gate6Confidence:
                              per-category pipeline where each model's signal is
                              evaluated independently — alignment is informational
                              only and must never gate a valid per-category signal.
+            data_quality_boost: Additive threshold adjustment from data-quality
+                             gate (e.g. +0.05 when feature vector is DEGRADED).
+                             Demands stronger conviction when data is sparse.
         """
         # ── Hard circuit breakers first ───────────────────────────
+        cb_level = str(risk_context.get("circuit_breaker_level", "OK"))
+        if cb_level in ("PAUSE", "HALT"):
+            return False, {
+                "gate":   6, "passed": False,
+                "reason": (
+                    f"Circuit breaker {cb_level}: "
+                    f"{risk_context.get('circuit_breaker_reason','')}"
+                ),
+                "circuit_breaker_level": cb_level,
+            }
+
         if not risk_context.get("trading_allowed", True):
             reason = "Risk circuit breaker active"
             if risk_context.get("monthly_dd_flag"):
-                reason = f"Monthly loss limit hit — trading halted this month"
+                reason = "Monthly loss limit hit — trading halted this month"
             elif risk_context.get("consecutive_loss_halt"):
                 reason = "3 consecutive losses — mandatory review pause"
             return False, {
@@ -92,13 +107,16 @@ class Gate6Confidence:
                     "alignment":   alignment,
                 }
 
-        # ── Confidence threshold (VIX-adaptive) ──────────────────
+        # ── Confidence threshold (VIX- and data-quality-adaptive) ─
         threshold = self.THRESHOLDS.get(model_type, {}).get(capital_mode, 0.60)
         india_vix = float(risk_context.get("india_vix", 0.0))
         if india_vix > 25:
             threshold = min(0.90, threshold + 0.10)
         elif india_vix > 20:
             threshold = min(0.90, threshold + 0.05)
+        # Data-quality boost — DEGRADED feature vectors need stronger conviction.
+        if data_quality_boost > 0:
+            threshold = min(0.95, threshold + data_quality_boost)
         if primary_conf < threshold:
             return False, {
                 "gate":        6,
@@ -106,11 +124,13 @@ class Gate6Confidence:
                 "reason":      (
                     f"Confidence {primary_conf:.0%} < "
                     f"{threshold:.0%} threshold "
-                    f"({capital_mode} {model_type} mode)"
+                    f"({capital_mode} {model_type} mode"
+                    f"{', +DQ boost' if data_quality_boost > 0 else ''})"
                 ),
                 "confidence":  primary_conf,
                 "threshold":   threshold,
                 "capital_mode":capital_mode,
+                "data_quality_boost": data_quality_boost,
             }
 
         # ── Final size multiplier (all gates combined) ─────────────
@@ -126,4 +146,5 @@ class Gate6Confidence:
             "capital_mode":  capital_mode,
             "alignment":     alignment,
             "final_size_mult":final_mult,
+            "data_quality_boost": data_quality_boost,
         }

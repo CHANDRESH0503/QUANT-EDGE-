@@ -36,6 +36,7 @@
 import argparse
 import logging
 import os
+import sqlite3
 
 # Prevent loky/multiprocessing semaphore leak on Python 3.14 / macOS.
 # Must be set before any transformers / tokenizers import.
@@ -88,6 +89,7 @@ SOCIAL_INTERVAL   = 7200   # 2-hr    social sentiment
 GLOBAL_INTERVAL   = 3600   # 1-hr    global macro
 EXIT_INTERVAL     = 60     # 1-min   stop/target exit monitor
 TICK_SLEEP        = 30     # main loop resolution (s)
+REVERSAL_COOLDOWN_SEC = 1800  # 30-min throttle on per-(ticker, cat, type) reversal alerts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,7 +141,6 @@ class MultiBankOrchestrator:
         self.telegram        = TelegramBot()
         self.fii_fetcher     = FIIFetcher(db_path)
         self.global_fetcher  = GlobalFetcher(db_path)
-        self.options_fetcher = OptionsFetcher(db_path)
         self.social_fetcher  = SocialFetcher(db_path)
         self.exit_engine     = ExitEngine(db_path)
         self.circuit_breaker = CircuitBreaker(db_path)
@@ -162,25 +163,29 @@ class MultiBankOrchestrator:
         from data.news_fetcher     import NewsFetcher
         from data.bse_fetcher      import BSEFetcher
 
-        self.engines:       Dict[str, SignalEngine] = {}
-        self.news_fetchers: Dict[str, NewsFetcher]  = {}
-        self.bse_fetchers:  Dict[str, BSEFetcher]   = {}
+        self.engines:         Dict[str, SignalEngine]   = {}
+        self.news_fetchers:   Dict[str, NewsFetcher]    = {}
+        self.bse_fetchers:    Dict[str, BSEFetcher]     = {}
+        self.options_fetchers: Dict[str, OptionsFetcher] = {}
 
         for t in tickers:
-            self.engines[t]       = SignalEngine(t, capital, db_path)
-            self.news_fetchers[t] = NewsFetcher(db_path=db_path, ticker=t)
-            self.bse_fetchers[t]  = BSEFetcher(db_path=db_path, ticker=t)
+            self.engines[t]         = SignalEngine(t, capital, db_path)
+            self.news_fetchers[t]   = NewsFetcher(db_path=db_path, ticker=t)
+            self.bse_fetchers[t]    = BSEFetcher(db_path=db_path, ticker=t)
+            self.options_fetchers[t]= OptionsFetcher(db_path=db_path, ticker=t)
 
         # ── Alert dedup state ─────────────────────────────────────────────────
         # Per-ticker, per-category: { ticker: { category: (direction, confidence) } }
         self._last_signal_by_cat: Dict[str, Dict[str, tuple]] = {
             t: {} for t in tickers
         }
-        # Reversal alerts: { (ticker, category, reversal_type) → True }
-        # Using a compound tuple key (NOT position_id) so dedup survives
-        # across position close→reopen cycles for the same ticker+category.
-        # Cleared only when the position for that ticker actually closes.
-        self._sent_reversals: Dict[tuple, bool] = {}
+        # Reversal alerts: { (ticker, category, reversal_type) → last_sent_ts }
+        # Compound tuple key (NOT position_id) so dedup survives position
+        # close→reopen for the same ticker+category. Also throttled by
+        # REVERSAL_COOLDOWN_SEC — without a time floor, fast model oscillation
+        # produced 5–15 Telegram alerts per 15-min cycle (audit CR-3).
+        # Entries are cleared when the position for that ticker actually closes.
+        self._sent_reversals: Dict[tuple, float] = {}
         # Last pipeline output per ticker (for market-open alert)
         self._last_signal_per_ticker: Dict[str, Dict] = {}
 
@@ -198,7 +203,10 @@ class MultiBankOrchestrator:
 
         # ── Daily / weekly one-shot flags (reset at midnight) ─────────────────
         self._premarket_done        = False
-        self._opened_today          = False
+        # Per-ticker 09:15 alert flag. Previously a single bool — once any
+        # bank's alert fired, the other 4 banks were silently suppressed for
+        # the rest of the day. Audit CR-2.
+        self._opened_today: Dict[str, bool] = {t: False for t in tickers}
         self._eod_sent              = False
         self._evening_sent          = False
         self._intraday_close_sent   = False
@@ -273,6 +281,38 @@ class MultiBankOrchestrator:
             RBIFetcher(self.db_path).seed_historical_rates()
         except Exception as e:
             logger.warning(f"RBI seed: {e}")
+
+        # Bootstrap global macro if the table is sparse (<7 rows needed for
+        # rolling features to be meaningful). Synthesises history from the
+        # 30-day price series we already fetch — lookahead-safe.
+        try:
+            if self.global_fetcher.get_row_count() < 7:
+                logger.info("global_snapshots <7 rows — running bootstrap_history")
+                self.global_fetcher.bootstrap_history(days=30)
+        except Exception as e:
+            logger.warning(f"global bootstrap: {e}")
+
+        # Bootstrap fundamentals on first boot. The Sunday 06:00 refresh
+        # populates these, but a fresh deployment would wait up to a week,
+        # and every positional signal eats a +5pp Gate 6 threshold via the
+        # H6 fundamentals_stale bubble until rows exist.
+        try:
+            conn = sqlite3.connect(self.db_path)
+            n_funds = conn.execute("SELECT COUNT(*) FROM fundamentals").fetchone()[0]
+            conn.close()
+            if n_funds < len(self.tickers):
+                logger.info(
+                    f"fundamentals has {n_funds} rows (<{len(self.tickers)}) — "
+                    "running first-boot fetch for all banks"
+                )
+                from processing.fundamental import FundamentalProcessor
+                for t in self.tickers:
+                    self._safe(
+                        f"fundamentals_bootstrap_{t}",
+                        FundamentalProcessor(self.db_path, t).fetch_and_update,
+                    )
+        except Exception as e:
+            logger.warning(f"fundamentals bootstrap: {e}")
 
         for t in self.tickers:
             try:
@@ -377,11 +417,10 @@ class MultiBankOrchestrator:
                 self._last_full_ts     = now
                 self._last_intraday_ts = now
 
-        # ── 09:15 — Market open alert (one-shot) ──────────────────────────────
-        if (is_open and not self._opened_today
-                and now_dt.hour == 9 and now_dt.minute < 20):
-            self._send_market_open_alerts()
-            self._opened_today = True
+        # ── 09:15 — Market open alert (one-shot per ticker) ───────────────────
+        if (is_open and now_dt.hour == 9 and now_dt.minute < 20
+                and not all(self._opened_today.values())):
+            self._send_market_open_alerts()  # internally honors per-ticker flag
 
         # ── 15:15–15:30 — Intraday close warning ──────────────────────────────
         if self.schedule.is_intraday_close_window():
@@ -441,13 +480,38 @@ class MultiBankOrchestrator:
         """
         Auto-open one paper position per passing category.
         Skips categories not in scope for this cycle (e.g. swing on 5-min run).
-        Skips if a position is already open for that ticker+category pair.
+
+        Risk guards (in order, all per ticker × category):
+          1. Capital-mode allowed_tf — SMALL only opens swing, etc.
+          2. Duplicate (ticker, category) already open → skip.
+          3. max_positions cap from CapitalMode (2/3/5).
+          4. PositionSizer.check_exposure() — 40% per-name, 80% total caps.
+        Exposure/position state is recomputed every iteration so the second
+        signal in a batch sees the first one's open position.
         """
+        from risk.capital_mode  import CapitalMode
+        from risk.position_sizer import PositionSizer
+
         emitted = signal.get("signals") or []
         if not emitted:
             return
 
-        open_positions = self.exit_engine._get_open_positions()
+        # Belt-and-suspenders: if the circuit breaker is currently PAUSE/HALT
+        # in the DB, refuse to open new positions regardless of what
+        # Gate 6 emitted earlier in this cycle.
+        cb_state = self.circuit_breaker.get_current_state()
+        if cb_state.get("level") in ("PAUSE", "HALT"):
+            logger.info(
+                f"[{ticker}] open suppressed — circuit breaker "
+                f"{cb_state['level']}: {cb_state.get('reason','')}"
+            )
+            return
+
+        cap_cfg     = CapitalMode.get_config(self.capital)
+        allowed_tf  = set(cap_cfg.get("allowed_tf", ["swing", "intraday", "positional"]))
+        max_pos     = int(cap_cfg.get("max_positions", 5))
+        cap_mode    = cap_cfg.get("mode", "FULL")
+        sizer       = PositionSizer()
 
         for sig in emitted:
             cat = sig.get("category", sig.get("trade_type", "swing"))
@@ -455,6 +519,18 @@ class MultiBankOrchestrator:
             if categories and cat not in categories:
                 continue
 
+            # Re-read state inside the loop — each successful open updates DB.
+            open_positions = self.exit_engine._get_open_positions()
+
+            # Guard 1 — capital-mode timeframe allow-list.
+            if cat not in allowed_tf:
+                logger.info(
+                    f"[{ticker}] skipped {cat}: {cap_mode} mode disallows "
+                    f"(allowed={sorted(allowed_tf)})"
+                )
+                continue
+
+            # Guard 2 — duplicate (ticker, category) already open.
             already_open = any(
                 p.get("ticker") == ticker and p.get("trade_type") == cat
                 for p in open_positions
@@ -462,13 +538,37 @@ class MultiBankOrchestrator:
             if already_open:
                 continue
 
+            # Guard 3 — max_positions cap (portfolio-wide).
+            if len(open_positions) >= max_pos:
+                logger.info(
+                    f"[{ticker}] skipped {cat}: {cap_mode} max_positions={max_pos} "
+                    f"reached (currently {len(open_positions)} open)"
+                )
+                continue
+
+            # Guard 4 — per-name (40%) + total portfolio (80%) exposure caps.
+            entry  = float(sig.get("entry_price", 0))
+            shares = int(sig.get("shares", 0))
+            proposed_value = entry * max(shares, 0)
+            exp = sizer.check_exposure(
+                ticker         = ticker,
+                proposed_value = proposed_value,
+                capital        = self.capital,
+                db_path        = self.db_path,
+            )
+            if not exp.get("allowed", True):
+                logger.info(
+                    f"[{ticker}] skipped {cat}: exposure block — {exp.get('reason','?')}"
+                )
+                continue
+
             try:
                 self.exit_engine.open_position(
                     signal       = sig["signal"],
-                    entry_price  = float(sig.get("entry_price",  0)),
+                    entry_price  = entry,
                     stop_price   = float(sig.get("stop_loss",    0)),
                     target_price = float(sig.get("target_price", 0)),
-                    shares       = int(sig.get("shares",         0)),
+                    shares       = shares,
                     risk_amount  = float(sig.get("risk_amount",  0)),
                     trade_type   = cat,
                     signal_uuid  = signal.get("signal_uuid", ""),
@@ -480,9 +580,10 @@ class MultiBankOrchestrator:
                 )
                 logger.info(
                     f"[{ticker}] opened paper trade: {cat} {sig['signal']} "
-                    f"@ ₹{sig.get('entry_price', 0):.2f} · "
-                    f"stop=₹{sig.get('stop_loss', 0):.2f} · "
-                    f"target=₹{sig.get('target_price', 0):.2f}"
+                    f"@ ₹{entry:.2f} · stop=₹{sig.get('stop_loss', 0):.2f} · "
+                    f"target=₹{sig.get('target_price', 0):.2f} "
+                    f"(value=₹{proposed_value:,.0f}, "
+                    f"name_exp_after=₹{exp.get('ticker_exposure',0)+proposed_value:,.0f})"
                 )
             except Exception as e:
                 logger.warning(f"[{ticker}] open_position({cat}): {e}")
@@ -623,10 +724,11 @@ class MultiBankOrchestrator:
                 continue
 
             key = (ticker, cat, rtype)
-            if key in self._sent_reversals:
-                continue    # already alerted — suppressed until position closes
+            last_sent = self._sent_reversals.get(key, 0.0)
+            if (time.time() - last_sent) < REVERSAL_COOLDOWN_SEC:
+                continue    # throttled — same alert within cooldown window
 
-            self._sent_reversals[key] = True
+            self._sent_reversals[key] = time.time()
             logger.warning(
                 f"[{ticker}] reversal: {rtype} cat={cat} "
                 f"{rev.get('open_signal')} → {rev.get('model_signal')}"
@@ -700,15 +802,20 @@ class MultiBankOrchestrator:
                 logger.warning(f"[{ticker}] exit check: {e}")
 
     def _send_market_open_alerts(self) -> None:
-        """09:15 — send market-open confirmation for each bank that has a live signal."""
+        """09:15 — send market-open confirmation for each bank that has a live
+        non-FLAT signal. One alert per ticker per day (per-ticker dedup); the
+        prior implementation broadcast a single universe-wide alert.
+        """
         for ticker in self.tickers:
+            if self._opened_today.get(ticker, False):
+                continue
             sig = self._last_signal_per_ticker.get(ticker)
             if sig and sig.get("signal") not in ("FLAT", None):
                 try:
                     self.telegram.send_market_open(sig)
-                    break   # one open alert per day is enough
+                    self._opened_today[ticker] = True
                 except Exception as e:
-                    logger.warning(f"market open alert: {e}")
+                    logger.warning(f"[{ticker}] market open alert: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # DATA TASKS
@@ -730,9 +837,12 @@ class MultiBankOrchestrator:
             self._safe("news", self._fetch_news_and_score)
             self._last_news_ts = now
 
-        # Options chain — every 30 min during market hours only
+        # Options chain — every 30 min during market hours only, per bank.
+        # Each bank's options chain is fetched from NSE separately so PCR /
+        # max-pain / IV percentile features stay isolated.
         if is_open and (now - self._last_options_ts) >= OPTIONS_INTERVAL:
-            self._safe("options", self.options_fetcher.fetch_and_calculate)
+            for t, fetcher in self.options_fetchers.items():
+                self._safe(f"options[{t}]", fetcher.fetch_and_calculate)
             self._last_options_ts = now
 
         # BSE announcements — every 30 min on trading days (NSE only publishes weekdays)
@@ -760,12 +870,41 @@ class MultiBankOrchestrator:
         """
         Fetch RSS for all 5 banks then run FinBERT once on the combined
         unscored pool. Cheaper than 5 separate scoring loops.
+        Aggregates per-source counts into one cycle summary line so we can
+        spot a feed source going dark from a single log grep.
         """
+        from data.news_fetcher import NewsFetcher
+        agg: Dict[str, int] = {}
         for t in self.tickers:
             try:
-                self.news_fetchers[t].fetch_all()
+                for source, n in self.news_fetchers[t].fetch_all().items():
+                    agg[source] = agg.get(source, 0) + n
             except Exception as e:
                 logger.warning(f"[{t}] news fetch: {e}")
+
+        total = sum(agg.values())
+        summary = " ".join(f"{k}={v}" for k, v in sorted(agg.items()))
+        logger.info(f"news cycle: {summary} [total={total}]")
+
+        if total == 0:
+            NewsFetcher._consecutive_empty_cycles += 1
+            if (NewsFetcher._consecutive_empty_cycles >= 2
+                    and not NewsFetcher._empty_alarm_sent):
+                msg = (
+                    f"⚠️ News pipeline empty for "
+                    f"{NewsFetcher._consecutive_empty_cycles} consecutive cycles — "
+                    f"every feed source returned 0 articles."
+                )
+                logger.warning(msg)
+                try:
+                    self.telegram.send_raw(msg)
+                    NewsFetcher._empty_alarm_sent = True
+                except Exception as e:
+                    logger.warning(f"news empty-cycle alarm telegram failed: {e}")
+        else:
+            NewsFetcher._consecutive_empty_cycles = 0
+            NewsFetcher._empty_alarm_sent = False
+
         try:
             n = self.finbert.process_unscored(batch_size=100)
             if n:
@@ -826,13 +965,21 @@ class MultiBankOrchestrator:
         logger.info("── Pre-market complete ──────────────────────────────────")
 
     def _run_circuit_breaker_check(self) -> None:
-        """Check portfolio drawdown and consecutive losses against circuit breaker."""
+        """
+        Check portfolio drawdown / consecutive losses.
+        `CircuitBreaker.check()` persists state transitions to DB, so future
+        signal-engine cycles read the live level via RiskFeatures regardless
+        of which tick discovered the breach.
+        """
         try:
+            from risk.capital_mode import CapitalMode
+            cap_mode = CapitalMode.detect(self.capital)
+
             stats         = self.portfolio.get_performance_stats() or {}
             monthly_dd    = float(stats.get("monthly_dd_pct",      0))
             consec_losses = int(stats.get("consecutive_losses",     0))
             _, cb_status  = self.circuit_breaker.check(
-                capital_mode       = "FULL",
+                capital_mode       = cap_mode,
                 monthly_dd_pct     = monthly_dd,
                 consecutive_losses = consec_losses,
             )
@@ -971,7 +1118,8 @@ class MultiBankOrchestrator:
     def _reset_daily_flags(self, now_dt: datetime) -> None:
         """Reset one-shot daily flags at midnight. Weekly flags reset on Monday."""
         self._premarket_done      = False
-        self._opened_today        = False
+        for _t in self._opened_today:
+            self._opened_today[_t] = False
         self._eod_sent            = False
         self._evening_sent        = False
         self._intraday_close_sent = False

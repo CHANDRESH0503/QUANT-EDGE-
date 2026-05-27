@@ -145,6 +145,8 @@ class FIIFetcher:
         if not rows:
             return self._empty_flow_features()
 
+        import numpy as _np
+
         fii_values = [r[1] for r in rows]
         dii_values = [r[2] or 0.0 for r in rows]
 
@@ -169,6 +171,21 @@ class FIIFetcher:
         # Bulk deals today
         bulk_summary = self._get_bulk_deal_summary()
 
+        # Alpha (2026-05-26): fii_flow_surprise = z-score of today's FII flow
+        # vs 20d baseline. Excludes today from the baseline so it doesn't get
+        # divided into its own deviation. Clipped to ±3σ to keep ML-friendly.
+        baseline = fii_values[1:20] if len(fii_values) >= 5 else []
+        if len(baseline) >= 5:
+            mu  = float(_np.mean(baseline))
+            sig = float(_np.std(baseline))
+            if sig > 0:
+                fii_surprise = (fii_1d - mu) / sig
+                fii_surprise = max(-3.0, min(3.0, fii_surprise))
+            else:
+                fii_surprise = 0.0
+        else:
+            fii_surprise = 0.0
+
         return {
             # Raw values
             "fii_net_1d_cr":    round(fii_1d, 2),
@@ -181,6 +198,9 @@ class FIIFetcher:
             # Normalised signals (-1 to +1)
             "fii_signal":       self._normalise_flow(fii_5d),
             "dii_signal":       self._normalise_flow(dii_3d),
+
+            # Alpha: standardised surprise (-3σ → +3σ clipped)
+            "fii_flow_surprise":round(fii_surprise, 4),
 
             # Direction
             "fii_trend":        fii_trend,
@@ -231,6 +251,18 @@ class FIIFetcher:
 
         bulk_summary = self._get_bulk_deal_summary_at(as_of_date[:10])
 
+        # Alpha: fii_flow_surprise — same definition as live path.
+        import numpy as _np
+        baseline = fii_values[1:20] if len(fii_values) >= 5 else []
+        if len(baseline) >= 5:
+            mu  = float(_np.mean(baseline))
+            sig = float(_np.std(baseline))
+            fii_surprise = (
+                max(-3.0, min(3.0, (fii_1d - mu) / sig)) if sig > 0 else 0.0
+            )
+        else:
+            fii_surprise = 0.0
+
         return {
             "fii_net_1d_cr":    round(fii_1d, 2),
             "fii_net_3d_cr":    round(fii_3d, 2),
@@ -240,6 +272,7 @@ class FIIFetcher:
             "dii_net_3d_cr":    round(dii_3d, 2),
             "fii_signal":       self._normalise_flow(fii_5d),
             "dii_signal":       self._normalise_flow(dii_3d),
+            "fii_flow_surprise":round(fii_surprise, 4),
             "fii_trend":        fii_trend,
             "dii_trend":        dii_trend,
             "flow_confluence":  confluence,
@@ -495,6 +528,7 @@ class FIIFetcher:
             "fii_net_5d_cr": 0, "fii_net_10d_cr": 0,
             "dii_net_1d_cr": 0, "dii_net_3d_cr": 0,
             "fii_signal": 0.0, "dii_signal": 0.0,
+            "fii_flow_surprise": 0.0,
             "fii_trend": "NEUTRAL", "dii_trend": "NEUTRAL",
             "flow_confluence": "MIXED",
             "bulk_net_cr": 0, "bulk_is_buying": False,

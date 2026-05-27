@@ -1,12 +1,14 @@
 # risk/circuit_breaker.py
-# Hard safety stops that override everything else
-# When triggered, trading halts until manually reset or conditions clear
-# Connected to: portfolio_tracker.py, signal_engine.py gate 6
+# Hard safety stops that override everything else.
+# When triggered, trading halts until manually reset or conditions clear.
+# State persists in DB so Gate 6 (and the orchestrator open-trade path) see it
+# across cycles — not just the cycle that detected the breach.
+# Connected to: portfolio_tracker.py, signal_engine.py gate 6, orchestrator
 
 import sqlite3
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,97 @@ class CircuitBreaker:
 
     def __init__(self, db_path: str = "database/trading.db"):
         self.db_path = db_path
+        self._setup_db()
+
+    # ─────────────────────────────────────────────────────────────
+    # STATE PERSISTENCE
+    # ─────────────────────────────────────────────────────────────
+
+    def _setup_db(self) -> None:
+        """Create circuit_breaker_state table if missing."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    level              TEXT    NOT NULL,
+                    reason             TEXT,
+                    capital_mode       TEXT,
+                    monthly_dd_pct     REAL,
+                    consecutive_losses INTEGER,
+                    set_at             TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_cb_set_at
+                ON circuit_breaker_state (set_at DESC)
+            """)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"circuit_breaker_state setup: {e}")
+
+    def get_current_state(self) -> Dict:
+        """
+        Latest row from circuit_breaker_state. Returns {'level': 'OK'} if no
+        row exists. The DB is authoritative — Gate 6 and the orchestrator
+        consult this state, not the in-memory result of the last `check()`.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            row = conn.execute("""
+                SELECT level, reason, capital_mode, monthly_dd_pct,
+                       consecutive_losses, set_at
+                FROM   circuit_breaker_state
+                ORDER  BY set_at DESC, id DESC
+                LIMIT  1
+            """).fetchone()
+            conn.close()
+        except Exception:
+            row = None
+        if not row:
+            return {"level": "OK", "trading_allowed": True}
+        return {
+            "level":              row[0],
+            "reason":             row[1] or "",
+            "capital_mode":       row[2] or "",
+            "monthly_dd_pct":     row[3] or 0.0,
+            "consecutive_losses": int(row[4] or 0),
+            "set_at":             row[5] or "",
+            "trading_allowed":    row[0] not in ("PAUSE", "HALT"),
+        }
+
+    def _persist_state(self, level: str, reason: str, capital_mode: str,
+                       monthly_dd_pct: float, consecutive_losses: int) -> None:
+        """
+        Append a row only when the level *changes* from the previous state.
+        Prevents the table from growing one row per cycle when level is
+        unchanged. OK transitions are recorded too so we can see when
+        trading resumed.
+        """
+        try:
+            current = self.get_current_state()
+            if current.get("level") == level:
+                return
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("""
+                INSERT INTO circuit_breaker_state
+                (level, reason, capital_mode, monthly_dd_pct,
+                 consecutive_losses, set_at)
+                VALUES (?,?,?,?,?,?)
+            """, (
+                level, reason, capital_mode,
+                float(monthly_dd_pct or 0), int(consecutive_losses or 0),
+                str(datetime.now()),
+            ))
+            conn.commit()
+            conn.close()
+            logger.info(
+                f"CircuitBreaker state changed: "
+                f"{current.get('level','?')} → {level} | {reason}"
+            )
+        except Exception as e:
+            logger.warning(f"circuit_breaker_state persist: {e}")
 
     def check(
         self,
@@ -134,6 +227,16 @@ class CircuitBreaker:
                 f"{warnings[0] if warnings else ''}"
             )
 
+        # Persist transitions to DB so Gate 6 / orchestrator see this state
+        # across cycles, not only the cycle that detected the breach.
+        self._persist_state(
+            level              = level,
+            reason             = "; ".join(warnings) if warnings else "OK",
+            capital_mode       = mode,
+            monthly_dd_pct     = monthly_dd_pct,
+            consecutive_losses = consecutive_losses,
+        )
+
         return trading_allowed, {
             "level":             level,
             "trading_allowed":   trading_allowed,
@@ -159,8 +262,8 @@ class CircuitBreaker:
         - PAUSE_NEW_ENTRIES: absolute VIX > 22 (warn zone)
         - OK               : normal conditions
 
-        Called by task_runner before every signal cycle.
-        On HALT_AND_FLATTEN, task_runner should close all intraday positions
+        Called by orchestrator before every signal cycle.
+        On HALT_AND_FLATTEN, orchestrator should close all intraday positions
         and tighten swing stops 50%.
         """
         action   = "OK"
@@ -203,9 +306,20 @@ class CircuitBreaker:
         }
 
     def is_halted(self, db_path: str = None) -> bool:
-        """Quick check — is system in HALT state?"""
-        return False
+        """Quick check — is the system currently HALTed or PAUSEd per DB state?"""
+        state = self.get_current_state()
+        return state.get("level") in ("PAUSE", "HALT")
 
     def manual_reset(self) -> None:
-        """Manually reset circuit breaker after review."""
-        logger.info("Circuit breaker manually reset by operator")
+        """Manually reset circuit breaker after review — writes an OK row."""
+        try:
+            self._persist_state(
+                level              = "OK",
+                reason             = "manual_reset",
+                capital_mode       = "",
+                monthly_dd_pct     = 0.0,
+                consecutive_losses = 0,
+            )
+            logger.info("Circuit breaker manually reset by operator")
+        except Exception as e:
+            logger.warning(f"manual_reset: {e}")

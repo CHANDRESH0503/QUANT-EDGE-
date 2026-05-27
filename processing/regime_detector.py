@@ -259,14 +259,18 @@ class RegimeDetector:
         """
         Returns regime as ML features — one-hot encoded + probability scores.
         Called by feature_builder.py before model prediction.
+
+        Scoped to self.ticker; legacy rows with ticker IS NULL are tolerated so
+        a fresh DB without ticker on regime_snapshots still works.
         """
         conn = self._connect()
         row  = conn.execute("""
             SELECT regime, bull_prob, bear_prob, high_vol_prob,
                    choppy_prob, stability, detected_at
             FROM   regime_snapshots
+            WHERE  ticker = ? OR ticker IS NULL
             ORDER  BY detected_at DESC LIMIT 1
-        """).fetchone()
+        """, (self.ticker,)).fetchone()
         conn.close()
 
         if not row:

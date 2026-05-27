@@ -43,6 +43,7 @@ class MacroFeatures:
         "intermarket_score",
         "rs_vs_banknifty",
         "banks_outperforming_nifty",
+        "banknifty_relative_momentum_5d",  # alpha 2026-05-26
         "peer_rank_norm",        # 1=rank1, 0=rank6
     ]
 
@@ -98,6 +99,16 @@ class MacroFeatures:
         peer_rank = int(intermarket_features.get("peer_rank", 3))
         peer_norm = round(1.0 - (peer_rank - 1) / 5, 3)  # rank1=1.0, rank6=0.0
 
+        # Alpha (2026-05-26): banknifty_relative_momentum_5d.
+        # Bank-sector excess return over broad market over 5 trading days.
+        # Clipped to ±10% (then /5 for [-2, +2] → /2 final → [-1, +1]).
+        # Source values come from intermarket._sector_rotation which fetches
+        # both indexes on the same period for an apples-to-apples comparison.
+        bn_5d_pct    = float(intermarket_features.get("banknifty_5d_pct", 0))
+        nf_5d_pct    = float(intermarket_features.get("nifty_5d_pct", 0))
+        bn_rel_mom_5d= max(-10.0, min(10.0, bn_5d_pct - nf_5d_pct))
+        bn_rel_mom_5d_norm = self._clip(bn_rel_mom_5d / 5.0)
+
         return {
             "india_vix_norm":            round(vix_norm, 4),
             "india_vix_trend":           round(vix_trend, 4),
@@ -111,6 +122,7 @@ class MacroFeatures:
             "intermarket_score":         round(im_score, 4),
             "rs_vs_banknifty":           round(rs_bn, 4),
             "banks_outperforming_nifty": round(bn_outperf, 4),
+            "banknifty_relative_momentum_5d": round(bn_rel_mom_5d_norm, 4),
             "peer_rank_norm":            round(peer_norm, 4),
         }
 

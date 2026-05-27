@@ -1,7 +1,7 @@
 # alerts/telegram_bot.py
 # Delivers all alerts to trader's phone via Telegram
 # Uses python-telegram-bot async API
-# Connected to: signal_engine.py, exit_engine.py, scheduler/task_runner.py
+# Connected to: signal_engine.py, exit_engine.py, orchestrator.py
 
 import logging
 import asyncio

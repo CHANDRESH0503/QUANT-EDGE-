@@ -138,15 +138,16 @@ class BSEFetcher:
         try:
             conn = self._connect()
 
-            # Look for board meeting announcements in DB
+            # Look for board meeting announcements in DB — for THIS ticker only.
             rows = conn.execute("""
                 SELECT title, description, announcement_date
                 FROM bse_announcements
-                WHERE category IN ('Board Meeting', 'Financial Results')
-                AND announcement_date > ?
+                WHERE (ticker = ? OR ticker IS NULL)
+                  AND category IN ('Board Meeting', 'Financial Results')
+                  AND announcement_date > ?
                 ORDER BY announcement_date ASC
                 LIMIT 5
-            """, (str(datetime.now()),)).fetchall()
+            """, (self.ticker, str(datetime.now()))).fetchall()
             conn.close()
 
             for row in rows:
@@ -176,7 +177,7 @@ class BSEFetcher:
 
     def get_recent_announcements(self, hours: int = 48) -> List[Dict]:
         """
-        Get recent announcements for LLM analysis and Telegram alerts.
+        Get recent announcements for LLM analysis and Telegram alerts — for THIS ticker.
         """
         since = datetime.now() - timedelta(hours=hours)
         conn = self._connect()
@@ -184,9 +185,10 @@ class BSEFetcher:
             SELECT id, title, description, category,
                    announcement_date, is_high_priority, llm_analyzed
             FROM bse_announcements
-            WHERE created_at > ?
+            WHERE (ticker = ? OR ticker IS NULL)
+              AND created_at > ?
             ORDER BY announcement_date DESC
-        """, (str(since),)).fetchall()
+        """, (self.ticker, str(since))).fetchall()
         conn.close()
 
         return [
@@ -222,11 +224,12 @@ class BSEFetcher:
                 rows = conn.execute("""
                     SELECT title, description, announcement_date
                     FROM bse_announcements
-                    WHERE category IN ('Board Meeting', 'Financial Results')
-                    AND announcement_date > ?
+                    WHERE (ticker = ? OR ticker IS NULL)
+                      AND category IN ('Board Meeting', 'Financial Results')
+                      AND announcement_date > ?
                     ORDER BY announcement_date ASC
                     LIMIT 20
-                """, (str(datetime.now().date()),)).fetchall()
+                """, (self.ticker, str(datetime.now().date()))).fetchall()
 
                 date_pattern = re.compile(
                     r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b'
@@ -326,18 +329,20 @@ class BSEFetcher:
 
     def get_high_priority_unanalyzed(self) -> List[Dict]:
         """
-        Get high-priority announcements not yet analyzed by LLM.
+        Get high-priority announcements not yet analyzed by LLM — for THIS ticker.
+        Legacy rows with ticker IS NULL are also returned for one-time cleanup.
         These trigger immediate LLM analysis regardless of schedule.
         """
         conn = self._connect()
         rows = conn.execute("""
             SELECT id, title, description, category
             FROM bse_announcements
-            WHERE is_high_priority = 1
-            AND llm_analyzed = 0
+            WHERE (ticker = ? OR ticker IS NULL)
+              AND is_high_priority = 1
+              AND llm_analyzed = 0
             ORDER BY created_at DESC
             LIMIT 5
-        """).fetchall()
+        """, (self.ticker,)).fetchall()
         conn.close()
 
         return [
@@ -382,11 +387,12 @@ class BSEFetcher:
 
                 conn.execute("""
                     INSERT OR IGNORE INTO bse_announcements
-                    (title, description, category, source,
+                    (ticker, title, description, category, source,
                      announcement_date, is_high_priority,
                      llm_analyzed, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
                 """, (
+                    self.ticker,
                     title.strip()[:500],
                     str(description)[:2000],
                     category,
@@ -399,7 +405,7 @@ class BSEFetcher:
                 if conn.execute("SELECT changes()").fetchone()[0] > 0:
                     new_count += 1
                     if is_high_priority:
-                        logger.info(f"[BSE HIGH PRIORITY] {title[:80]}")
+                        logger.info(f"[{self.ticker}] [BSE HIGH PRIORITY] {title[:80]}")
 
             except Exception as e:
                 logger.warning(f"Failed to save announcement: {e}")
@@ -422,11 +428,12 @@ class BSEFetcher:
 
                 conn.execute("""
                     INSERT OR IGNORE INTO bse_announcements
-                    (title, description, category, source,
+                    (ticker, title, description, category, source,
                      announcement_date, is_high_priority,
                      llm_analyzed, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
                 """, (
+                    self.ticker,
                     title[:500],
                     description[:2000],
                     category,
@@ -468,26 +475,37 @@ class BSEFetcher:
         return conn
 
     def _ensure_earnings_calendar(self, conn: sqlite3.Connection) -> None:
-        """Create earnings_calendar table if it doesn't exist (idempotent)."""
+        """
+        Create earnings_calendar table if it doesn't exist (idempotent).
+        Schema matches database/db_setup.py — UNIQUE(ticker, result_date) so
+        all 5 banks share the table without colliding.
+        """
         conn.execute("""
             CREATE TABLE IF NOT EXISTS earnings_calendar (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker      TEXT    DEFAULT 'HDFCBANK.NS',
-                result_date TEXT    UNIQUE,
+                ticker      TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
+                result_date TEXT    NOT NULL,
                 source      TEXT    DEFAULT 'hardcoded',
                 confirmed   INTEGER DEFAULT 0,
-                created_at  TEXT
+                created_at  TEXT,
+                UNIQUE(ticker, result_date)
             )
         """)
         conn.commit()
 
     def _setup_db(self) -> None:
-        """Create bse_announcements table if it does not exist."""
+        """
+        Create bse_announcements table if it does not exist.
+        Schema matches database/db_setup.py — composite UNIQUE(ticker, title,
+        announcement_date) so two banks can file announcements with the same
+        title (e.g. "Board Meeting Outcome") without one clobbering the other.
+        """
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS bse_announcements (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                title             TEXT    UNIQUE,
+                ticker            TEXT    NOT NULL DEFAULT 'HDFCBANK.NS',
+                title             TEXT,
                 description       TEXT,
                 category          TEXT,
                 source            TEXT,
@@ -495,9 +513,17 @@ class BSEFetcher:
                 is_high_priority  INTEGER DEFAULT 0,
                 llm_analyzed      INTEGER DEFAULT 0,
                 llm_impact_score  REAL    DEFAULT 0.0,
-                created_at        TEXT
+                created_at        TEXT,
+                UNIQUE(ticker, title, announcement_date)
             )
         """)
+        # Best-effort migration: add ticker column if the table predates this.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(bse_announcements)")}
+        if "ticker" not in cols:
+            conn.execute(
+                "ALTER TABLE bse_announcements ADD COLUMN "
+                "ticker TEXT NOT NULL DEFAULT 'HDFCBANK.NS'"
+            )
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_bse_created
             ON bse_announcements (created_at DESC)
@@ -505,6 +531,10 @@ class BSEFetcher:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_bse_priority
             ON bse_announcements (is_high_priority, llm_analyzed)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bse_ticker_created
+            ON bse_announcements (ticker, created_at DESC)
         """)
         conn.commit()
         conn.close()

@@ -1166,7 +1166,25 @@ async def live_data(
 
 
 def _load_last_gate_results(ticker_safe: str = "HDFCBANK") -> dict:
-    """Load last gate_results written by signal_engine for dashboard display."""
+    """Load last gate_results written by signal_engine for dashboard display.
+
+    DB is the source of truth (`gate_results` table, UPSERT per cycle). The
+    legacy JSON file is consulted only if the DB row is missing — a safety
+    net for an in-flight deploy where the new write hasn't run yet.
+    """
+    ticker_full = f"{ticker_safe}.NS"
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row  = conn.execute(
+            "SELECT gate_results FROM gate_results WHERE ticker = ?",
+            (ticker_full,),
+        ).fetchone()
+        conn.close()
+        if row and row[0]:
+            return json.loads(row[0])
+    except Exception:
+        pass
+
     path = f"logs/last_gate_results_{ticker_safe}.json"
     try:
         if os.path.exists(path):

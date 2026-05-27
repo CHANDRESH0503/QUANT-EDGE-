@@ -103,11 +103,21 @@ class Gate2RuleFilter:
             reasons.append(f"Earnings in {int(days_earn)}d — hard block within 3 days")
 
         # ── Check 5: Fundamentals acceptable ─────────────────────
+        # POOR / UNKNOWN  → hard fail.
+        # DEFAULTED       → pass (don't paralyse trading on a fresh DB) but
+        #                    surface `fundamentals_stale=True` so the per-category
+        #                    pipeline can lift the positional Gate-6 threshold.
+        # Everything else → pass.
         fund_grade = context.get("fundamental_grade", "GOOD")
         fund_ok    = fund_grade not in ("POOR", "UNKNOWN")
         checks["fundamentals_ok"] = fund_ok
         if not fund_ok:
             reasons.append(f"Poor fundamental grade: {fund_grade}")
+        fundamentals_stale = fund_grade == "DEFAULTED"
+        if fundamentals_stale:
+            reasons.append(
+                "Fundamentals DEFAULTED (no DB rows) — positional threshold +5pp"
+            )
 
         # ── Check 6: No high-severity anomaly ────────────────────
         anomaly_sev = context.get("anomaly_severity", "LOW")
@@ -163,14 +173,16 @@ class Gate2RuleFilter:
         passed      = n_passed >= self.MIN_PASSES and len(hard_failed) == 0
 
         return passed, {
-            "gate":         2,
-            "passed":       passed,
-            "n_passed":     n_passed,
-            "n_total":      len(checks),
-            "hard_failed":  hard_failed,
-            "checks":       checks,
-            "fail_reasons": reasons,
-            "pass_rate":    round(n_passed / len(checks), 3),
-            "regime":       regime,
-            "vix_level":    vix,
+            "gate":               2,
+            "passed":             passed,
+            "n_passed":           n_passed,
+            "n_total":            len(checks),
+            "hard_failed":        hard_failed,
+            "checks":             checks,
+            "fail_reasons":       reasons,
+            "pass_rate":          round(n_passed / len(checks), 3),
+            "regime":             regime,
+            "vix_level":          vix,
+            "fundamentals_stale": fundamentals_stale,
+            "fundamental_grade":  fund_grade,
         }
