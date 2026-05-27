@@ -20,7 +20,7 @@ One `SignalEngine` per bank; all 3 categories evaluated each cycle. Pre-Gate-1: 
 | 1 | Regime | per-bank | CHOPPY → block. Stability <25% → block. `regime_match` computed BEFORE Gate 5/6. Aligned: normal threshold + full size. Counter-regime positional: HARD BLOCK. Positional+HIGH_VOL: HARD BLOCK (max_hold=2d). Counter-regime swing: +7pp Gate 6. Counter-regime intraday: +10pp Gate 6. HIGH_VOL aligned: +5pp Gate 6. low_stability (25–40%): +5pp Gate 6. regime_changes ≥2: +5pp Gate 6. Counter-regime size: 0.5×. |
 | 2 | Rule Filter | per-bank | 11 checks, need 8+. Hard fails: earnings <3d, VIX ≥28, anomaly HIGH. Fundamentals DEFAULTED → soft-pass + bubble `fundamentals_stale`. Regime-aware: BEAR flips checks 5/8/9/10 (POOR fundamentals, hostile macro, global risk-off, rupee stress all CONFIRM short thesis). Stale macro → treated as neutral. |
 | 3 | Universe Rank | per-bank | Ranks 5 banks; per-regime cache. BULL: strongest bank gets 1.00× (rank-1). BEAR: score inverted — weakest bank (most negative momentum) gets 1.00× (best short). Disqualifies score <−5: in BULL = falling knife; in BEAR = rising stock (short-squeeze risk). should_switch = ticker_rank > 2. |
-| 4 | ML Models | per-bank | Passes iff ≥1 model non-FLAT. Alignment INFORMATIONAL — boosts conf+size, never vetoes. |
+| 4 | ML Models | per-bank | Passes iff ≥1 model non-FLAT. Alignment grades: A+(+15pp/1.20×) · A(+10pp/1.0×) · B(+5pp/0.85×) · B−(−5pp/0.75×, 2-vs-1 split) · C(0pp/0.70×) · F(−20pp/0.50×, 1-vs-1 split only). Conf floor 0.0. All grades INFORMATIONAL. |
 | 5 | S/R Validator | per-category | Entry quality A/B/C/D per direction (SHORT inverts R:R). Hard block: S/R R:R < 0.5:1. Soft penalty: 0.5–2.0. Grade-D override: conf ≥62% (blocked if also counter-regime). |
 | 6 | Confidence | per-category | FULL: swing 60% / pos 55% / intra 65%. Boosts: VIX +5/+10pp · DEGRADED features +5pp · positional + DEFAULTED fundamentals +5pp · capped +15pp. Reads `circuit_breaker_level` directly. |
 
@@ -109,6 +109,12 @@ DD multipliers (mode-aware, shared with `CircuitBreaker.THRESHOLDS`): SMALL halt
 **G3-2 — Per-regime cache separation.** Previously `_RANK_CACHE` was a single `(ts, list)` tuple. If HDFC cycled in BULL and ICICI cycled in BEAR, the second bank would incorrectly reuse the first bank's scoring (BULL vs BEAR rankings are completely different). Changed to `Dict[regime: (ts, list)]` so each regime gets its own TTL-controlled cache entry.
 
 **G3-3 — should_switch hardcoded to HDFC's rank.** `should_switch = hdfc_rank > 2` compared HDFC's rank regardless of which bank's engine was running. When evaluating ICICI's engine in BEAR (ICICI = rank-1 best short), `hdfc_rank = 5 > 2` incorrectly fired `should_switch=True` for ICICI. Fixed to `ticker_rank > 2` — each bank's engine evaluates its OWN rank against the top-2 threshold.
+
+**G4-1 — F-grade blocked valid 2-vs-1 majority signals.** Grade F fired for BOTH "2 models agree, 1 dissents" AND "1 LONG vs 1 SHORT" conflicts, applying −20pp to ALL models in both cases. When swing+positional both said LONG but intraday dissented SHORT, F-grade dropped LONG confidence from 0.68 → 0.48 — below every Gate 6 threshold. Missed entry. Fixed by adding **Grade B−** for 2-vs-1 conflicts: conf_boost=−5pp, size=0.75×. The majority direction is mildly penalised and still proceeds. Grade F now reserved for true 1-vs-1 splits (balanced disagreement, no majority). 20yr rule: if two higher-timeframe models agree and one intraday model dissents, trust the timeframe consensus.
+
+**G4-2 — Confidence floor missing.** `min(0.95, conf + boost)` could produce negative confidence values when F-grade (−0.20) hit a low-confidence model (e.g., 0.10 − 0.20 = −0.10). Fixed: `max(0.0, min(0.95, ...))`.
+
+**G4-3 — MIN_CONF dead code.** `MIN_CONF` dict defined in Gate 4 but never consumed there — thresholds are enforced in Gate 6. Marked as DOCUMENTATION ONLY with a comment.
 
 ---
 
