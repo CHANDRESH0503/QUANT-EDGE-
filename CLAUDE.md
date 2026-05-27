@@ -17,7 +17,7 @@ One `SignalEngine` per bank; all 3 categories evaluated each cycle. Pre-Gate-1: 
 
 | Gate | Name | Scope | Logic |
 |------|------|-------|-------|
-| 1 | Regime | per-bank | CHOPPY → block. Stability <25% → block. `regime_match` computed BEFORE Gate 5/6 so threshold boosts apply. Aligned trades: normal threshold + full size. Counter-regime positional: HARD BLOCK. Counter-regime swing: +7pp Gate 6. Counter-regime intraday: +10pp Gate 6. HIGH_VOL (any dir): +5pp Gate 6. Counter-regime size penalty: 0.5×. |
+| 1 | Regime | per-bank | CHOPPY → block. Stability <25% → block. `regime_match` computed BEFORE Gate 5/6. Aligned: normal threshold + full size. Counter-regime positional: HARD BLOCK. Positional+HIGH_VOL: HARD BLOCK (max_hold=2d). Counter-regime swing: +7pp Gate 6. Counter-regime intraday: +10pp Gate 6. HIGH_VOL aligned: +5pp Gate 6. low_stability (25–40%): +5pp Gate 6. regime_changes ≥2: +5pp Gate 6. Counter-regime size: 0.5×. |
 | 2 | Rule Filter | per-bank | 11 checks, need 8+. Hard fails: earnings <3d, VIX ≥28, anomaly HIGH. Fundamentals DEFAULTED → soft-pass + bubble `fundamentals_stale`. |
 | 3 | Universe Rank | global | Ranks 5 banks; size_mult by rank. Disqualifies on falling-knife score <−5. 2-min TTL cache. |
 | 4 | ML Models | per-bank | Passes iff ≥1 model non-FLAT. Alignment INFORMATIONAL — boosts conf+size, never vetoes. |
@@ -28,9 +28,11 @@ One `SignalEngine` per bank; all 3 categories evaluated each cycle. Pre-Gate-1: 
 
 **Capital-mode `allowed_tf` enforced** at signal_engine AND `_open_paper_trades` (SMALL=swing · GROWING=swing+intra · FULL=all). Disallowed categories return structured FLAT with reason for dashboard.
 
-**Counter-regime trades:** positional always blocked. Swing/intraday allowed at 0.5× size with raised Gate 6 threshold (+7pp/+10pp). `regime_match` evaluated BEFORE Gate 5/6 so threshold boost is baked in — Gate 6 is no longer regime-blind.
+**Counter-regime trades:** positional always blocked. Swing/intraday allowed at 0.5× size with raised Gate 6 threshold (+7pp swing / +10pp intraday). `regime_match` evaluated BEFORE Gate 5/6 so threshold boost is baked in — Gate 6 is no longer regime-blind.
 **Counter-regime + Grade D double-jeopardy hard block** — if `regime_match=False` AND `entry_quality=D`, the category is blocked regardless of confidence.
+**Positional in HIGH_VOLATILITY hard block** — `max_hold_days=2` in HIGH_VOL is structurally incompatible with a 14–28 day positional hold. Hard blocked in `signal_engine.py` before Gate 5. Swing/intraday fine with +5pp Gate 6 boost.
 **BEAR_TRENDING `position_mult` = 1.0** (symmetric with BULL_TRENDING = 1.2). Aligned BEAR SHORTs no longer penalised vs aligned BULL LONGs.
+**Gate 6 instability boosts (G1-4):** `low_stability` (25–40% of last 10 bars agree on regime) → +5pp. `regime_changes ≥ 2` in last 10d (HMM oscillating) → +5pp. Both stack with counter-regime and other boosts; capped at +15pp total.
 
 ---
 
@@ -91,6 +93,12 @@ DD multipliers (mode-aware, shared with `CircuitBreaker.THRESHOLDS`): SMALL halt
 **G1-2 — Positional counter-regime hard block.** 2–4 week positional hold against confirmed BEAR (or SHORT in BULL) was only penalised at 0.4× size before. Hard block added in signal_engine per-category loop before Gate 5 — no confidence threshold compensates for a multi-week hold against the macro regime. Applies to all 5 banks.
 
 **G1-3 — BEAR position_mult asymmetry fixed.** `REGIME_RULES["BEAR_TRENDING"]["position_mult"]` was 0.8, meaning a confirmed-regime SHORT in BEAR got 0.8× size while a confirmed-regime LONG in BULL got 1.2×. Asymmetric and unfair to aligned SHORTs. Changed to 1.0 — symmetric baseline for aligned trades in either trending regime.
+
+**G1-4 — Gate 6 threshold blind to regime stability.** Gate 1 surfaced `low_stability` (stability 25–40%) and `regime_changes` (HMM flips in last 10 days) in its return dict, but `signal_engine.py` only used them for position sizing (already baked into `position_mult`). Gate 6 never received a threshold boost. Fixed: two new variables `regime_low_stability` + `regime_changes_count` extracted from `g1_ctx` before the per-category loop; each adds +5pp to `cat_boost` when true (stacks with other boosts, capped at +15pp). 20-yr rule: a weakly established regime is NOT a clean trend — demand extra confirmation before entering, regardless of direction.
+
+**G1-5 — Positional blocked in HIGH_VOLATILITY.** `REGIME_RULES["HIGH_VOLATILITY"]["max_hold_days"] = 2`. A positional trade holds 14–28 trading days. Entering a 4-week thesis in a regime where the market may gap violently for only 2 days means the stop gets hit before any trend develops. This is a structural incompatibility that no confidence threshold can compensate. Hard block added in `signal_engine.py` per-category loop (before Gate 5) for `cat == "positional" and regime_name == "HIGH_VOLATILITY"`. Swing and intraday in HIGH_VOL are fine with +5pp Gate 6 boost.
+
+**G1-6 — max_hold_days wired end-to-end.** `max_hold_days` was defined in `REGIME_RULES` but never surfaced past `RegimeDetector`. Fixed: `_build_result()` now returns `max_hold_days` in the rules dict; `gate1_regime.check()` reads and returns it in `g1_ctx`; `signal_engine.py` can enforce it for future hold-time expiry logic. BULL: 8 → 21 days (trend is exactly when multi-week positionals are most profitable). BEAR: 3 → 4 days (short-side moves are violent and fast; don't overstay).
 
 ---
 
