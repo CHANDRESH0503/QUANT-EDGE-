@@ -309,20 +309,37 @@ class SignalEngine:
         # adjustments take effect — Gate 6 is no longer regime-blind.
         #
         # Regime handling matrix (20-yr trader rules):
-        # ┌─────────────────┬──────────────┬──────────────────────────────────┐
-        # │ Regime          │ Direction    │ Action                           │
-        # ├─────────────────┼──────────────┼──────────────────────────────────┤
-        # │ BULL/BEAR       │ Aligned      │ Normal threshold, full size      │
-        # │ BULL/BEAR       │ Counter      │ +7pp/+10pp threshold, 0.5× size  │
-        # │ HIGH_VOLATILITY │ Any          │ +5pp threshold, 0.5× size        │
-        # │ CHOPPY_SIDEWAYS │ Any          │ BLOCKED at Gate 1                │
-        # ├─────────────────┴──────────────┴──────────────────────────────────┤
-        # │ Positional + counter-regime     → HARD BLOCK (2-4wk vs trend)    │
-        # │ Any cat + counter-regime + GrD  → HARD BLOCK (double jeopardy)   │
-        # └───────────────────────────────────────────────────────────────────┘
+        # ┌──────────────────────────┬──────────────┬──────────────────────────────────────────┐
+        # │ Regime / condition       │ Direction    │ Action                                   │
+        # ├──────────────────────────┼──────────────┼──────────────────────────────────────────┤
+        # │ BULL/BEAR                │ Aligned      │ Normal threshold, full size              │
+        # │ BULL/BEAR                │ Counter      │ +7pp/+10pp threshold, 0.5× size          │
+        # │ HIGH_VOLATILITY          │ Any swing/   │ +5pp threshold, 0.5× size                │
+        # │                          │ intraday     │                                          │
+        # │ CHOPPY_SIDEWAYS          │ Any          │ BLOCKED at Gate 1                        │
+        # ├──────────────────────────┴──────────────┴──────────────────────────────────────────┤
+        # │ Positional + counter-regime      → HARD BLOCK (2–4 wk hold vs macro trend)        │
+        # │ Positional + HIGH_VOLATILITY     → HARD BLOCK (max_hold=2d vs 14–28d hold)        │
+        # │ Any cat + counter-regime + Gr D  → HARD BLOCK (double jeopardy)                   │
+        # │ Gate 1 low_stability (25–40%)    → +5pp Gate 6 threshold (regime weakly set)      │
+        # │ Gate 1 regime_changes ≥ 2/10d   → +5pp Gate 6 threshold (HMM oscillating)        │
+        # └──────────────────────────────────────────────────────────────────────────────────────┘
         regime_trend = self.regime_detector.get_recent_regime_trend()
         per_category   = {}
         signals_emitted = []
+
+        # ── Stability / instability flags from Gate 1 → Gate 6 boost ──
+        # Both flags are surfaced by gate1_regime.py and represent two
+        # independent symptoms of a noisy regime environment:
+        #   low_stability    — only 25–40% of the last 10 bars agree on the
+        #                      current regime (weakly established; gate1 already
+        #                      reduced position size, but Gate 6 also needs to
+        #                      demand higher conviction).
+        #   regime_changes   — HMM flipped regime ≥2 times in the last 10 days;
+        #                      the model is oscillating, not cleanly transitioning.
+        # Each adds +5pp to Gate 6 threshold (caps at +15pp total with others).
+        regime_low_stability = g1_ctx.get("low_stability", False)
+        regime_changes_count = int(g1_ctx.get("regime_changes", 0))
 
         # Capital-mode allowed timeframes — SMALL only trades swing, GROWING
         # adds intraday, FULL unlocks positional. A category not in the
@@ -407,6 +424,34 @@ class SignalEngine:
                 )
                 continue
 
+            # ── Hard block: positional in HIGH_VOLATILITY ─────────
+            # HIGH_VOLATILITY regime has max_hold_days=2 (violent intraday
+            # gaps, no persistent trend). A positional trade needs 14–28 days
+            # to work — the stop gets hit in the noise before the thesis plays
+            # out. This is a structural incompatibility, not a confidence issue;
+            # no ML score can compensate for holding a 4-week thesis in a
+            # 2-day maximum-hold environment. Swing and intraday are fine here
+            # with the +5pp threshold boost already applied below.
+            if cat == "positional" and regime_name == "HIGH_VOLATILITY":
+                per_category[cat] = {
+                    "category":     cat,
+                    "passed":       False,
+                    "direction":    direction,
+                    "confidence":   round(conf_b, 4),
+                    "regime_match": regime_match,
+                    "gate5":        None,
+                    "gate6":        None,
+                    "reason":       (
+                        "Positional blocked in HIGH_VOLATILITY — "
+                        "max_hold_days=2 incompatible with 14–28 day positional horizon"
+                    ),
+                }
+                logger.info(
+                    f"[{self.ticker}] POSITIONAL BLOCKED: HIGH_VOLATILITY regime "
+                    f"(max_hold_days=2 vs 14–28 day positional hold)"
+                )
+                continue
+
             # ── Gate 5: S/R per category direction ───────────────
             # per_category_mode=True drops the alignment requirement in
             # the Grade-D override — a single-model signal at high
@@ -452,7 +497,10 @@ class SignalEngine:
             #   • Counter-regime intraday   → +10pp (fighting trend + intraday momentum)
             #   • Counter-regime swing      → +7pp  (bounces possible but need conviction)
             #   • HIGH_VOLATILITY (aligned) → +5pp  (noise amplified; need stronger signal)
+            #   • Gate 1 low_stability      → +5pp  (25–40% stability: regime weakly set)
+            #   • Gate 1 regime_changes ≥2  → +5pp  (HMM oscillating in last 10 days)
             # Positional counter-regime is BLOCKED above — never reaches here.
+            # Positional HIGH_VOLATILITY is BLOCKED above — never reaches here.
             cat_boost = dq_threshold_boost
             if cat == "positional" and g2_ctx.get("fundamentals_stale"):
                 cat_boost = min(0.15, cat_boost + 0.05)
@@ -476,6 +524,25 @@ class SignalEngine:
                 logger.debug(
                     f"[{self.ticker}] {cat.upper()} HIGH_VOL boost "
                     f"+5pp → threshold boost = {cat_boost:.0%}"
+                )
+
+            # Gate 1 instability signals → additional Gate 6 threshold lifts.
+            # These stack on top of the regime-direction boosts above. Both are
+            # independent symptoms of a degraded regime signal — even if the
+            # direction is aligned and regime is tradeable, we demand more
+            # conviction when the regime itself is weakly established or
+            # oscillating. Each adds +5pp (total cap remains +15pp).
+            if regime_low_stability:
+                cat_boost = min(0.15, cat_boost + 0.05)
+                logger.debug(
+                    f"[{self.ticker}] {cat.upper()} low-stability boost "
+                    f"+5pp → threshold boost = {cat_boost:.0%}"
+                )
+            if regime_changes_count >= 2:
+                cat_boost = min(0.15, cat_boost + 0.05)
+                logger.debug(
+                    f"[{self.ticker}] {cat.upper()} regime-instability boost "
+                    f"+5pp ({regime_changes_count} flips/10d) → threshold boost = {cat_boost:.0%}"
                 )
 
             g6_pass, g6_ctx = self.gate6.check(

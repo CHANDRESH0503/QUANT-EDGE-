@@ -73,7 +73,7 @@ class RegimeDetector:
             "trade_long":       True,
             "trade_short":      False,
             "position_mult":    1.2,   # aligned LONG boosted — trend is your friend
-            "max_hold_days":    8,
+            "max_hold_days":    21,    # was 8 — BULL is the BEST time for positional holds (2–4 wk)
             "stop_mult":        1.5,
             "description":      "Strong uptrend — buy dips, hold longer",
         },
@@ -84,7 +84,7 @@ class RegimeDetector:
                                        # Bear markets have violent gap-up rallies so no extra boost,
                                        # but a confirmed-regime SHORT deserves full allocation.
                                        # Counter-regime LONGs still get 1.0 × 0.5 = 0.5× in engine.
-            "max_hold_days":    3,
+            "max_hold_days":    4,     # BEAR: quick exits — don't hold shorts more than 4 trading days
             "stop_mult":        1.2,
             "description":      "Downtrend — shorts aligned, quick exits, counter-LONGs need conviction",
         },
@@ -92,7 +92,9 @@ class RegimeDetector:
             "trade_long":       True,
             "trade_short":      True,
             "position_mult":    0.5,   # both directions: half size — vol is direction-agnostic
-            "max_hold_days":    2,
+            "max_hold_days":    2,     # HIGH_VOL: intraday / next-day exit only. Positional is blocked
+                                       # in signal_engine — a 14–28 day hold in HIGH_VOL means riding
+                                       # violent swings across the entire hold period.
             "stop_mult":        2.0,
             "description":      "High volatility — half size, wide stops, higher conviction required",
         },
@@ -459,15 +461,16 @@ class RegimeDetector:
                        probs: Dict) -> Dict:
         rules = self.REGIME_RULES.get(regime, self.REGIME_RULES["CHOPPY_SIDEWAYS"])
         return {
-            "regime":       regime,
-            "stability":    round(stability, 3),
-            "rules":        rules,
-            "description":  rules["description"],
-            "probs":        probs,
-            "trade_long":   rules["trade_long"],
-            "trade_short":  rules["trade_short"],
-            "position_mult":rules["position_mult"],
-            "detected_at":  str(datetime.now()),
+            "regime":        regime,
+            "stability":     round(stability, 3),
+            "rules":         rules,
+            "description":   rules["description"],
+            "probs":         probs,
+            "trade_long":    rules["trade_long"],
+            "trade_short":   rules["trade_short"],
+            "position_mult": rules["position_mult"],
+            "max_hold_days": rules["max_hold_days"],   # surfaced so gate1 / signal_engine can enforce
+            "detected_at":   str(datetime.now()),
         }
 
     def _map_states_to_regimes(self, X: pd.DataFrame, states: np.ndarray) -> None:

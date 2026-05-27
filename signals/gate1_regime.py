@@ -67,70 +67,83 @@ class Gate1Regime:
         Returns:
             (passed: bool, context: Dict)
         """
-        regime      = regime_result.get("regime", "CHOPPY_SIDEWAYS")
-        stability   = float(regime_result.get("stability", 0.5))
-        trade_long  = bool(regime_result.get("trade_long",  False))
-        trade_short = bool(regime_result.get("trade_short", False))
-        pos_mult    = float(regime_result.get("position_mult", 1.0))
+        regime        = regime_result.get("regime", "CHOPPY_SIDEWAYS")
+        stability     = float(regime_result.get("stability", 0.5))
+        trade_long    = bool(regime_result.get("trade_long",  False))
+        trade_short   = bool(regime_result.get("trade_short", False))
+        pos_mult      = float(regime_result.get("position_mult", 1.0))
+        max_hold_days = int(regime_result.get("max_hold_days", 8))
 
         # ── Hard block ────────────────────────────────────────────
         if regime in self.BLOCKED:
             return False, {
                 "gate":    1,
                 "passed":  False,
-                "reason":  f"CHOPPY_SIDEWAYS regime — all signals blocked",
+                "reason":  "CHOPPY_SIDEWAYS regime — all signals blocked",
                 "regime":  regime,
                 "action":  "Stay in cash. Wait for clear trend.",
             }
 
-        # ── Direction filter (only when a direction is given) ─────
+        # ── Direction filter ──────────────────────────────────────
+        # NOTE: signal_engine always calls this with signal_direction=None
+        # ("User directive 4B") so the blocks below NEVER fire in production.
+        # They are preserved for unit-testing and future opt-in use.
+        # Per-category direction control (counter-regime penalty + threshold
+        # boosts) is handled in signal_engine.py, not here.
         if signal_direction == "LONG" and not trade_long:
             return False, {
                 "gate":    1,
                 "passed":  False,
-                "reason":  f"{regime} — LONG signals not allowed",
+                "reason":  f"{regime} — LONG not allowed (direction filter active)",
                 "regime":  regime,
                 "action":  "Only SHORT signals allowed in current regime",
             }
-
         if signal_direction == "SHORT" and not trade_short:
             return False, {
                 "gate":    1,
                 "passed":  False,
-                "reason":  f"{regime} — SHORT signals not allowed",
+                "reason":  f"{regime} — SHORT not allowed (direction filter active)",
                 "regime":  regime,
                 "action":  "Only LONG signals allowed in current regime",
             }
 
-        # ── Stability check ───────────────────────────────────────
-        # Hard block only when regime is extremely uncertain (<25%).
-        # Between 25–40%, reduce position size instead of blocking entirely —
-        # the regime is still the plurality direction, just not firmly established.
+        # ── Stability hard block ──────────────────────────────────
+        # < 25% means fewer than 25% of the last 10 bars agreed on this
+        # regime — below uniform distribution for a 4-class model.
+        # Regime is too uncertain to act on.
         if stability < self.MIN_STABILITY:
             return False, {
                 "gate":    1,
                 "passed":  False,
-                "reason":  f"Regime stability too low: {stability:.0%} (need {self.MIN_STABILITY:.0%})",
+                "reason":  f"Regime stability {stability:.0%} < {self.MIN_STABILITY:.0%} — too uncertain",
                 "regime":  regime,
                 "action":  "Wait for regime to stabilise",
             }
 
+        # ── Stability flag (25–40% = low but tradeable with caution) ─
+        # signal_engine reads low_stability from g1_ctx and adds +5pp to
+        # Gate 6 threshold — size reduction alone is insufficient when the
+        # regime is only weakly established.
         low_stability = stability < 0.40
 
-        # ── Instability multiplier (recent regime change) ─────────
+        # ── Instability multiplier (recent regime transitions) ────
+        # ≥ 2 regime flips in the last 10 days = model is oscillating,
+        # not genuinely transitioning — higher-noise environment.
+        # signal_engine reads regime_changes from g1_ctx and adds another
+        # +5pp to Gate 6 threshold (stacks with low_stability boost).
         regime_changes = int(regime_trend.get("changes", 0))
         final_mult     = pos_mult
         if regime_changes >= 2:
             final_mult = round(pos_mult * self.INSTABILITY_MULT, 3)
             logger.info(
-                f"Gate 1: Regime unstable ({regime_changes} changes) "
-                f"— size reduced to {final_mult:.2f}x"
+                f"Gate 1: Regime unstable ({regime_changes} changes in 10d) "
+                f"— size reduced to {final_mult:.2f}×"
             )
         if low_stability:
             final_mult = round(final_mult * self.LOW_STAB_MULT, 3)
             logger.info(
                 f"Gate 1: Low stability ({stability:.0%}) "
-                f"— size further reduced to {final_mult:.2f}x"
+                f"— size further reduced to {final_mult:.2f}×"
             )
 
         return True, {
@@ -138,8 +151,9 @@ class Gate1Regime:
             "passed":         True,
             "regime":         regime,
             "stability":      stability,
-            "low_stability":  low_stability,
+            "low_stability":  low_stability,    # True when 25%–40%: +5pp Gate 6 in signal_engine
             "position_mult":  final_mult,
+            "max_hold_days":  max_hold_days,    # regime-specific hold limit; enforced in signal_engine
             "description":    regime_result.get("description", ""),
-            "regime_changes": regime_changes,
+            "regime_changes": regime_changes,   # ≥2 flips in 10d: +5pp Gate 6 in signal_engine
         }
