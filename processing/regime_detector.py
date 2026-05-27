@@ -65,10 +65,14 @@ class RegimeDetector:
     }
 
     REGIME_RULES = {
+        # position_mult applies to ALIGNED trades (regime-backing direction).
+        # Counter-regime trades get an additional 0.5× penalty in signal_engine
+        # ON TOP of this mult. Keep BULL and BEAR symmetric for aligned trades
+        # so a confirmed BEAR SHORT has the same baseline size as a confirmed BULL LONG.
         "BULL_TRENDING": {
             "trade_long":       True,
             "trade_short":      False,
-            "position_mult":    1.2,
+            "position_mult":    1.2,   # aligned LONG boosted — trend is your friend
             "max_hold_days":    8,
             "stop_mult":        1.5,
             "description":      "Strong uptrend — buy dips, hold longer",
@@ -76,18 +80,21 @@ class RegimeDetector:
         "BEAR_TRENDING": {
             "trade_long":       False,
             "trade_short":      True,
-            "position_mult":    0.8,
+            "position_mult":    1.0,   # aligned SHORT: normal size (was 0.8 — asymmetric vs BULL).
+                                       # Bear markets have violent gap-up rallies so no extra boost,
+                                       # but a confirmed-regime SHORT deserves full allocation.
+                                       # Counter-regime LONGs still get 1.0 × 0.5 = 0.5× in engine.
             "max_hold_days":    3,
             "stop_mult":        1.2,
-            "description":      "Downtrend — short only, quick exits",
+            "description":      "Downtrend — shorts aligned, quick exits, counter-LONGs need conviction",
         },
         "HIGH_VOLATILITY": {
             "trade_long":       True,
             "trade_short":      True,
-            "position_mult":    0.5,
+            "position_mult":    0.5,   # both directions: half size — vol is direction-agnostic
             "max_hold_days":    2,
             "stop_mult":        2.0,
-            "description":      "High volatility — half size, wide stops",
+            "description":      "High volatility — half size, wide stops, higher conviction required",
         },
         "CHOPPY_SIDEWAYS": {
             "trade_long":       False,

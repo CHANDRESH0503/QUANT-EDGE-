@@ -304,19 +304,22 @@ class SignalEngine:
             f"| align={alignment} ✓"
         )
 
-        # ── Per-category pipeline: Gate 5 → Gate 6 (independent) ─
-        # User directive 4B: regime never vetoes a per-category direction.
-        # Every non-FLAT category runs the FULL Gate 5 + Gate 6 evaluation
-        # every cycle — even if the model's direction contradicts the regime
-        # bias (e.g. swing LONG in BEAR). The Gate 1 position_mult already
-        # caps size for unstable / contrarian regimes; this surface gives
-        # the dashboard a complete, non-"awaiting" status for every panel.
+        # ── Per-category pipeline (Gate 5 → Gate 6, regime-aware) ──
+        # Regime is evaluated per-category BEFORE Gate 5/6 so threshold
+        # adjustments take effect — Gate 6 is no longer regime-blind.
         #
-        # Exception — counter-regime + Grade D double-jeopardy hard block:
-        # If regime_match=False AND entry_quality=D, the signal is blocked.
-        # The S/R geometry is already unfavourable (Grade D) AND the regime
-        # is adverse — no confidence level can compensate for both risks
-        # compounding. Counter-regime Grade C or better still allowed (0.5×).
+        # Regime handling matrix (20-yr trader rules):
+        # ┌─────────────────┬──────────────┬──────────────────────────────────┐
+        # │ Regime          │ Direction    │ Action                           │
+        # ├─────────────────┼──────────────┼──────────────────────────────────┤
+        # │ BULL/BEAR       │ Aligned      │ Normal threshold, full size      │
+        # │ BULL/BEAR       │ Counter      │ +7pp/+10pp threshold, 0.5× size  │
+        # │ HIGH_VOLATILITY │ Any          │ +5pp threshold, 0.5× size        │
+        # │ CHOPPY_SIDEWAYS │ Any          │ BLOCKED at Gate 1                │
+        # ├─────────────────┴──────────────┴──────────────────────────────────┤
+        # │ Positional + counter-regime     → HARD BLOCK (2-4wk vs trend)    │
+        # │ Any cat + counter-regime + GrD  → HARD BLOCK (double jeopardy)   │
+        # └───────────────────────────────────────────────────────────────────┘
         regime_trend = self.regime_detector.get_recent_regime_trend()
         per_category   = {}
         signals_emitted = []
@@ -364,6 +367,46 @@ class SignalEngine:
                 }
                 continue
 
+            # ── Regime match — computed EARLY (drives threshold boost) ─
+            # Must run before Gate 5/6 so the counter-regime boost is baked
+            # into Gate 6's threshold rather than only affecting position size.
+            # Previously this ran AFTER Gate 6 — Gate 6 was regime-blind.
+            trade_long  = bool(regime_result.get("trade_long",  False))
+            trade_short = bool(regime_result.get("trade_short", False))
+            regime_name = regime_result.get("regime", "")
+            regime_match = (
+                (direction == "LONG"  and trade_long) or
+                (direction == "SHORT" and trade_short)
+            )
+
+            # ── Hard block: positional counter-regime ─────────────
+            # A positional trade holds 2–4 weeks. Holding LONG for weeks
+            # in a confirmed BEAR (or SHORT in BULL) is fighting the macro
+            # trend across an entire monthly cycle. No ML confidence justifies
+            # this — the regime itself is the dominant signal at that horizon.
+            # Swing and intraday counter-regime are allowed with a higher
+            # confidence threshold (bounces / intraday mean-reversion exist).
+            if cat == "positional" and not regime_match:
+                per_category[cat] = {
+                    "category":     cat,
+                    "passed":       False,
+                    "direction":    direction,
+                    "confidence":   round(conf_b, 4),
+                    "regime_match": regime_match,
+                    "gate5":        None,
+                    "gate6":        None,
+                    "reason":       (
+                        f"Positional counter-regime blocked — "
+                        f"{direction} in {regime_name} "
+                        f"(2–4 week hold against macro trend)"
+                    ),
+                }
+                logger.info(
+                    f"[{self.ticker}] POSITIONAL BLOCKED: counter-regime "
+                    f"({direction} in {regime_name})"
+                )
+                continue
+
             # ── Gate 5: S/R per category direction ───────────────
             # per_category_mode=True drops the alignment requirement in
             # the Grade-D override — a single-model signal at high
@@ -376,19 +419,65 @@ class SignalEngine:
                 per_category_mode=True,
             )
 
-            # ── Gate 6: confidence with this category's threshold ─
-            # alignment is informational only in per-category mode.
-            # Threshold lifters that stack additively (capped at +0.15 total):
-            #   • DEGRADED feature vector → +5pp (every category)
-            #   • Fundamentals DEFAULTED  → +5pp (positional only — long-hold
-            #                                    most exposed to fundamental surprises)
-            #   • Macro data stale (>30h) → +5pp (positional only — macro
-            #                                    backdrop most matters here)
+            # ── Counter-regime + Grade D hard block ──────────────
+            # Both penalties compound — S/R geometry unfavourable (Grade D)
+            # AND macro regime adverse. No confidence compensates for both.
+            # (Gate 6 runs next; skip it entirely for this combination.)
+            if g5_pass and not regime_match and g5_ctx.get("entry_quality") == "D":
+                per_category[cat] = {
+                    "category":     cat,
+                    "passed":       False,
+                    "direction":    direction,
+                    "confidence":   round(conf_b, 4),
+                    "regime_match": regime_match,
+                    "gate5":        g5_ctx,
+                    "gate6":        None,
+                    "reason":       (
+                        f"Counter-regime {direction} in {regime_name} "
+                        f"+ Grade D entry — double jeopardy block "
+                        f"(regime_match=False + entry_quality=D)"
+                    ),
+                }
+                logger.info(
+                    f"[{self.ticker}] {cat.upper()} BLOCKED: counter-regime + Grade D "
+                    f"({direction} in {regime_name}, conf={conf_b:.0%})"
+                )
+                continue
+
+            # ── Gate 6: confidence with regime-aware threshold ────
+            # Threshold lifters stack additively (capped at +0.15 total):
+            #   • DEGRADED feature vector   → +5pp (every category)
+            #   • Fundamentals DEFAULTED    → +5pp (positional — long-hold risk)
+            #   • Macro data stale (>30h)   → +5pp (positional — macro matters most)
+            #   • Counter-regime intraday   → +10pp (fighting trend + intraday momentum)
+            #   • Counter-regime swing      → +7pp  (bounces possible but need conviction)
+            #   • HIGH_VOLATILITY (aligned) → +5pp  (noise amplified; need stronger signal)
+            # Positional counter-regime is BLOCKED above — never reaches here.
             cat_boost = dq_threshold_boost
             if cat == "positional" and g2_ctx.get("fundamentals_stale"):
                 cat_boost = min(0.15, cat_boost + 0.05)
             if cat == "positional" and int(raw.get("macro_stale", 0)) == 1:
                 cat_boost = min(0.15, cat_boost + 0.05)
+
+            if not regime_match:
+                # Counter-regime: demand extra conviction relative to the timeframe.
+                # Intraday faces the steepest penalty because it fights both the
+                # multi-day trend AND intraday momentum in a single session.
+                counter_boost = 0.10 if cat == "intraday" else 0.07
+                cat_boost = min(0.15, cat_boost + counter_boost)
+                logger.debug(
+                    f"[{self.ticker}] {cat.upper()} counter-regime boost "
+                    f"+{counter_boost:.0%} → threshold boost = {cat_boost:.0%}"
+                )
+            elif regime_name == "HIGH_VOLATILITY":
+                # Even aligned trades in HIGH_VOL need more conviction — signal
+                # quality degrades when volatility is elevated (more false positives).
+                cat_boost = min(0.15, cat_boost + 0.05)
+                logger.debug(
+                    f"[{self.ticker}] {cat.upper()} HIGH_VOL boost "
+                    f"+5pp → threshold boost = {cat_boost:.0%}"
+                )
+
             g6_pass, g6_ctx = self.gate6.check(
                 primary_conf=conf_b,
                 alignment=alignment,
@@ -398,44 +487,6 @@ class SignalEngine:
                 skip_alignment=True,
                 data_quality_boost=cat_boost,
             )
-
-            # Regime-direction match flag — informational only (drives
-            # dashboard tinting + size, never vetoes the signal).
-            trade_long  = bool(regime_result.get("trade_long",  False))
-            trade_short = bool(regime_result.get("trade_short", False))
-            regime_match = (
-                (direction == "LONG"  and trade_long) or
-                (direction == "SHORT" and trade_short)
-            )
-
-            # ── Counter-regime + Grade D hard block ──────────────
-            # Allowing a Grade-D entry in a counter-regime trade doubles the
-            # risk: the S/R geometry is already unfavourable (Grade D) AND the
-            # macro regime is adverse (0.5× size). The two penalties compound
-            # in a way that no confidence level can compensate for — the entry
-            # is both structurally poor and trend-opposed. Hard block here;
-            # Grade D counter-regime signals are probes, not real trades.
-            if g5_pass and not regime_match and g5_ctx.get("entry_quality") == "D":
-                per_category[cat] = {
-                    "category":     cat,
-                    "passed":       False,
-                    "direction":    direction,
-                    "confidence":   round(conf_b, 4),
-                    "regime_match": regime_match,
-                    "gate5":        g5_ctx,
-                    "gate6":        g6_ctx,
-                    "reason":       (
-                        f"Counter-regime {direction} in {regime_result.get('regime','?')} "
-                        f"with Grade D entry blocked — double jeopardy "
-                        f"(regime_match=False + entry_quality=D)"
-                    ),
-                }
-                logger.info(
-                    f"[{self.ticker}] {cat.upper()} BLOCKED: counter-regime + Grade D "
-                    f"({direction} in {regime_result.get('regime','?')}, "
-                    f"conf={conf_b:.0%})"
-                )
-                continue
 
             passed_all = bool(g5_pass and g6_pass)
             per_category[cat] = {
@@ -455,10 +506,17 @@ class SignalEngine:
                 continue
 
             # ── Position sizing for this category ──────────────────
-            # Counter-regime trades (LONG in BEAR, SHORT in BULL) are
-            # not vetoed — the model has its edge — but sized at 0.5×
-            # for risk discipline. A 20yr trader's rule: contrarian
-            # signals must earn their size with confirmation, not faith.
+            # Size multiplier chain — each gate contributes a fraction:
+            #   Gate 1: regime base  (BULL=1.2×, BEAR=1.0×, HIGH_VOL=0.5×)
+            #   Gate 3: universe rank (rank-1 bank gets highest mult)
+            #   Gate 4: ML alignment boost
+            #   Gate 5: entry quality (A=1.0, B=0.85, C=0.65, D=0.40)
+            #   Gate 6: circuit breaker / DD mult
+            #   Regime: aligned=1.0×, counter-regime=0.5× (positional blocked above)
+            #
+            # Counter-regime swing/intraday: Gate 6 threshold already raised
+            # (+7pp/+10pp) above. The 0.5× size on top makes this a small probe —
+            # you need 67-75% confidence AND accept half-size to bet against trend.
             size_mult_cat = (
                 g1_ctx.get("position_mult",  1.0) *
                 g3_ctx.get("size_mult",       1.0) *
