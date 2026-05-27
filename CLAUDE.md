@@ -21,7 +21,7 @@ One `SignalEngine` per bank; all 3 categories evaluated each cycle. Pre-Gate-1: 
 | 2 | Rule Filter | per-bank | 11 checks, need 8+. Hard fails: earnings <3d, VIX ≥28, anomaly HIGH. Fundamentals DEFAULTED → soft-pass + bubble `fundamentals_stale`. |
 | 3 | Universe Rank | global | Ranks 5 banks; size_mult by rank. Disqualifies on falling-knife score <−5. 2-min TTL cache. |
 | 4 | ML Models | per-bank | Passes iff ≥1 model non-FLAT. Alignment INFORMATIONAL — boosts conf+size, never vetoes. |
-| 5 | S/R Validator | per-category | Entry quality A/B/C/D per direction (SHORT inverts R:R). Grade-D override: conf ≥62%. |
+| 5 | S/R Validator | per-category | Entry quality A/B/C/D per direction (SHORT inverts R:R). Hard block: S/R R:R < 0.5:1. Soft penalty: 0.5–2.0. Grade-D override: conf ≥62% (blocked if also counter-regime). |
 | 6 | Confidence | per-category | FULL: swing 60% / pos 55% / intra 65%. Boosts: VIX +5/+10pp · DEGRADED features +5pp · positional + DEFAULTED fundamentals +5pp · capped +15pp. Reads `circuit_breaker_level` directly. |
 
 **Data quality gate** (pre-Gate-4): POOR → hard FLAT. DEGRADED → +5pp Gate 6 threshold. `macro_stale=1` from `GlobalFetcher.is_stale(30h)` floor-clamps quality to DEGRADED.
@@ -29,6 +29,7 @@ One `SignalEngine` per bank; all 3 categories evaluated each cycle. Pre-Gate-1: 
 **Capital-mode `allowed_tf` enforced** at signal_engine AND `_open_paper_trades` (SMALL=swing · GROWING=swing+intra · FULL=all). Disallowed categories return structured FLAT with reason for dashboard.
 
 **Counter-regime trades** (LONG in BEAR / SHORT in BULL) allowed at 0.5× size.
+**Counter-regime + Grade D double-jeopardy hard block** — if `regime_match=False` AND `entry_quality=D`, the category is blocked regardless of confidence. Two compounding risk factors that no ML confidence can compensate for.
 
 ---
 
@@ -54,6 +55,8 @@ One `SignalEngine` per bank; all 3 categories evaluated each cycle. Pre-Gate-1: 
 | GROWING | ₹50K–₹2L | 1.5% | 3 | swing+intra | 60%/60%/68% |
 | FULL | >₹2L | 2% | 5 | all three | 60%/55%/65% |
 
+**Paper-trading override:** `FORCE_CAPITAL_MODE=FULL` in `/etc/quantedge.env` (default since 2026-05-27). Bypasses ₹ auto-detection so all 3 timeframes stay active regardless of configured capital. `CapitalMode.detect()` checks this first; consumed by `risk_features.py` → Gate 6. Remove or set to `""` before going live.
+
 Exposure caps (live-enforced): 40% per-name · 80% total. VIX >20: +5pp · >25: +10pp · ≥28: HALT_AND_FLATTEN.
 Exit: 1R→book 50% | 2R→book 30% | trail 20% chandelier (3×ATR).
 DD multipliers (mode-aware, shared with `CircuitBreaker.THRESHOLDS`): SMALL halt −8% / GROWING −12% / FULL −15%.
@@ -71,6 +74,16 @@ DD multipliers (mode-aware, shared with `CircuitBreaker.THRESHOLDS`): SMALL halt
 **CR-3 — Reversal alert 30-min cooldown.** `_sent_reversals` was keyed by `(ticker, cat, type)` with no time floor — model oscillations spammed Telegram. Cooldown via `REVERSAL_COOLDOWN_SEC=1800` (30 min). Position-close still clears entries for that ticker.
 
 **E1 — Intermarket cache.** `_fetch_peer_data` and `_sector_rotation` in `processing/intermarket.py` were called inside every per-bank FeatureBuilder, doing 7 yfinance calls × 5 banks = 35/cycle. Now class-level TTL cache (`_INTERMARKET_CACHE_TTL_SEC=300`) → 7/cycle. Same outputs, ~5× yfinance reduction.
+
+**PT-1 — Paper-trading capital mode.** `FORCE_CAPITAL_MODE` was defined in `config.py` but never consumed — a dead config variable. Now wired into `CapitalMode.detect()` (checked before ₹ auto-detection) and consumed by `risk_features.py`. Default set to `"FULL"` so paper trading runs with all 3 timeframes unlocked regardless of `STARTING_CAPITAL`. `STARTING_CAPITAL` default bumped to ₹5,00,000.
+
+**PT-2 — Gate 5 S/R R:R hard floor.** Previous code only reduced `size_mult` for poor S/R R:R — a signal with R:R 0.2:1 (resistance 5× closer than support) was passing Gate 5 with just a size penalty. Added `RR_HARD_BLOCK = 0.5`: any signal where the S/R geometry means you risk more than 2× to make 1× is now a hard block, not a soft penalty. Soft penalty (0.5× size) preserved for the 0.5–2.0 range.
+
+**PT-3 — Counter-regime + Grade D double-jeopardy block.** Gate 5 Grade D override allowed a LONG-in-BEAR signal at 82% confidence. Two compounding negatives — (1) regime adversarial, (2) entry quality D (far from support, near resistance) — that no confidence level compensates for. `signal_engine.py` now explicitly blocks: if `regime_match=False AND entry_quality=D`, the category is rejected with reason "double jeopardy" before position sizing runs. Counter-regime Grade C or better still allowed at 0.5× size.
+
+**PT-4 — Dashboard capital mode banner.** `tradingDashboard.html` had `● SMALL CAPITAL MODE · ₹10,000` hardcoded (line 865). Replaced with dynamic `id=capitalModeBadge` element; `updateCapitalBadge()` JS function reads `capital_mode` + `is_paper_trading` + `starting_capital` from the API response (exposed at top-level in `dashboard_api.py`). Now shows `🧪 PAPER · FULL MODE · ALL TIMEFRAMES · ₹X.XL` during paper phase; switches to `💰 LIVE` when `QE_PAPER_TRADING=0`.
+
+**PT-5 — Gate 1 docstring corrected.** Docstring claimed "BEAR_TRENDING → SHORT signals only" — completely wrong since "User directive 4B" was implemented (Gate 1 called with `signal_direction=None`, direction check is dead code). Rewritten to document actual behavior: hard blocks only on CHOPPY + low stability; all other regimes apply size multipliers; counter-regime trades penalized 0.5× in `signal_engine.py` not here.
 
 ---
 
@@ -93,8 +106,10 @@ DD multipliers (mode-aware, shared with `CircuitBreaker.THRESHOLDS`): SMALL halt
 
 ## What's Still To Do
 
+> **Paper-trading phase active (started 2026-05-27).** Target: 1–2 months of live outcome data before scaling capital or retraining. Scale capital when: Win >52%, PF >1.5, Sharpe >1.0, Max DD <20%, 50+ closed trades.
+
 ### High Priority
-1. **5 alpha features** — wire into `feature_builder.py` + `*_FEATURES_PROD`, retrain Sunday:
+1. **5 alpha features** — wire into `feature_builder.py` + `*_FEATURES_PROD`, retrain after 8–12 weeks:
    - `finbert_momentum_3d` = `score_24h − score_72h`
    - `fii_flow_surprise` = z-score of FII flow vs 20d baseline
    - `banknifty_relative_momentum_5d` = `banknifty_5d_pct − nifty_5d_pct`
@@ -111,6 +126,12 @@ DD multipliers (mode-aware, shared with `CircuitBreaker.THRESHOLDS`): SMALL halt
 6. **Gate 3 dashboard** — already reads `gate_results.gate3` from DB after JSON→DB migration. Verify panel renders identically.
 7. **L-1** — confirm `_eod_sent`, `_evening_sent`, `_intraday_close_sent` are intentionally global one-shots (vs per-ticker like `_opened_today`).
 8. **E3/E4** — collapse 5× `GlobalFetcher.is_stale` per cycle; share sqlite3 connections within a cycle.
+
+### Before Going Live (remove paper-trading overrides)
+- Set `FORCE_CAPITAL_MODE=""` (or remove) in `/etc/quantedge.env` — restores ₹-based auto-detection
+- Set `QE_PAPER_TRADING=0` — switches dashboard banner from 🧪 PAPER to 💰 LIVE
+- Set `STARTING_CAPITAL` to actual account size
+- Verify DD thresholds match account risk tolerance (Rule #22)
 
 ---
 
@@ -152,6 +173,11 @@ OMP_NUM_THREADS=1
 MKL_NUM_THREADS=1
 TELEGRAM_TOKEN=<your_token>
 TELEGRAM_CHAT_ID=7873846599
+# Paper-trading phase — keeps all 3 timeframes active regardless of capital.
+# Remove or set FORCE_CAPITAL_MODE="" before going live with real money.
+FORCE_CAPITAL_MODE=FULL
+QE_PAPER_TRADING=1
+STARTING_CAPITAL=500000
 EOF
 chmod 600 /etc/quantedge.env
 
@@ -268,6 +294,9 @@ sqlite3 /root/TradingBot/database/trading.db \
 17. **Reversal alerts have a 30-min cooldown per `(ticker, cat, type)`** (`REVERSAL_COOLDOWN_SEC` in `orchestrator.py`). Position-close clears entries for that ticker.
 18. **VPS deployments must set `QE_IS_VPS=1`** in `/etc/quantedge.env` — otherwise Google News fetches waste cycles on a 403 from DigitalOcean IPs.
 19. **Intermarket peer/sector fetches are universe-cached** (`_intermarket_cache` in `processing/intermarket.py`, 5-min TTL). Don't add per-bank yfinance calls there.
+20. **Gate 5 S/R R:R hard floor = 0.5** (`RR_HARD_BLOCK` in `gate5_sr_validator.py`). R:R below 0.5:1 is a hard block regardless of confidence. Soft size-penalty only for 0.5–2.0 range. Don't lower this floor — it prevents statistically losing entry geometry.
+21. **Counter-regime + Grade D = hard block** (`signal_engine.py` per-category loop). If `regime_match=False` AND `entry_quality=D`, reject the category before sizing. Counter-regime trades need at least Grade C entry quality to proceed (at 0.5× size).
+22. **`FORCE_CAPITAL_MODE` must be explicitly unset (or set to `""`) before going live.** Currently defaults to `"FULL"` for paper trading. Leaving it as `"FULL"` in production would remove risk-of-ruin guardrails that SMALL/GROWING modes enforce on small accounts.
 
 ## Deferred (long-horizon)
 Bank Nifty futures hedging · shadow-mode deployment · Kelly sizing · `scale_pos_weight` balancing · pooled multi-ticker model with ticker embedding · P3 features (LLM earnings score, social contrarian, Google Trends alt data).
