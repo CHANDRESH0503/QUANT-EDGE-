@@ -468,6 +468,7 @@ class SignalEngine:
                 ml_confidence=conf_b,
                 alignment=alignment,
                 per_category_mode=True,
+                category=cat,
             )
 
             # ── Counter-regime + Grade D hard block ──────────────

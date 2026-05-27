@@ -21,7 +21,7 @@ One `SignalEngine` per bank; all 3 categories evaluated each cycle. Pre-Gate-1: 
 | 2 | Rule Filter | per-bank | 11 checks, need 8+. Hard fails: earnings <3d, VIX ≥28, anomaly HIGH. Fundamentals DEFAULTED → soft-pass + bubble `fundamentals_stale`. Regime-aware: BEAR flips checks 5/8/9/10 (POOR fundamentals, hostile macro, global risk-off, rupee stress all CONFIRM short thesis). Stale macro → treated as neutral. |
 | 3 | Universe Rank | per-bank | Ranks 5 banks; per-regime cache. BULL: strongest bank gets 1.00× (rank-1). BEAR: score inverted — weakest bank (most negative momentum) gets 1.00× (best short). Disqualifies score <−5: in BULL = falling knife; in BEAR = rising stock (short-squeeze risk). should_switch = ticker_rank > 2. |
 | 4 | ML Models | per-bank | Passes iff ≥1 model non-FLAT. Alignment grades: A+(+15pp/1.20×) · A(+10pp/1.0×) · B(+5pp/0.85×) · B−(−5pp/0.75×, 2-vs-1 split) · C(0pp/0.70×) · F(−20pp/0.50×, 1-vs-1 split only). Conf floor 0.0. All grades INFORMATIONAL. |
-| 5 | S/R Validator | per-category | Entry quality A/B/C/D per direction (SHORT inverts R:R). Hard block: S/R R:R < 0.5:1. Soft penalty: 0.5–2.0. Grade-D override: conf ≥62% (blocked if also counter-regime). |
+| 5 | S/R Validator | per-category | Entry quality A/B/C/D per direction (SHORT inverts R:R). Hard block: S/R R:R < 0.5:1. Soft penalty: 0.5–2.0. Grade-D override: positional≥68% / swing≥65% / intraday≥62%. SHORT near_breakout: 0.80× size penalty (buyers aggressive = breakout risk). empty_sr() returns Grade D. |
 | 6 | Confidence | per-category | FULL: swing 60% / pos 55% / intra 65%. Boosts: VIX +5/+10pp · DEGRADED features +5pp · positional + DEFAULTED fundamentals +5pp · capped +15pp. Reads `circuit_breaker_level` directly. |
 
 **Data quality gate** (pre-Gate-4): POOR → hard FLAT. DEGRADED → +5pp Gate 6 threshold. `macro_stale=1` from `GlobalFetcher.is_stale(30h)` floor-clamps quality to DEGRADED.
@@ -115,6 +115,12 @@ DD multipliers (mode-aware, shared with `CircuitBreaker.THRESHOLDS`): SMALL halt
 **G4-2 — Confidence floor missing.** `min(0.95, conf + boost)` could produce negative confidence values when F-grade (−0.20) hit a low-confidence model (e.g., 0.10 − 0.20 = −0.10). Fixed: `max(0.0, min(0.95, ...))`.
 
 **G4-3 — MIN_CONF dead code.** `MIN_CONF` dict defined in Gate 4 but never consumed there — thresholds are enforced in Gate 6. Marked as DOCUMENTATION ONLY with a comment.
+
+**G5-1 — `_empty_sr()` Grade C inconsistency.** `SupportResistanceEngine._empty_sr()` hardcoded `entry_quality="C"` / `entry_quality_score=0.2`. When sup_dist=res_dist=5%, `_entry_quality(0.05, 0.05, 1, 1)` computes rr=1.0 < 1.5 → Grade D / -0.2. The inconsistency silently promoted no-data entries to a better-than-warranted grade. Fixed: `_empty_sr()` now returns `"D"` / `-0.2`, consistent with the actual formula.
+
+**G5-2 — Grade D override uniform threshold.** `GRADE_D_OVERRIDE_CONF` was a single float (0.62). Grade D = far from support (LONG) or near support (SHORT) — poor entry geometry. A positional trade carries that geometry for 3-4 weeks; intraday is out by end-of-day. Same threshold for both is structurally wrong. Fixed: `GRADE_D_OVERRIDE_CONF` → category-aware dict: `positional=0.68`, `swing=0.65`, `intraday=0.62`. `check()` signature gains `category="swing"` parameter; signal_engine passes `category=cat`. Error messages now show the threshold that was compared.
+
+**G5-3 — SHORT `near_breakout` not penalised.** LONG had a `near_breakout` boost (+10% size, "confirm with volume"). SHORT had no corresponding check. `near_breakout=True` means volume is spiking at resistance, buyers are aggressive — that's the worst possible moment to enter a SHORT (potential breakout, not a rollover). Added: SHORT `near_breakout` → `size_mult × 0.80` + warning note. Symmetric with the LONG check but opposite direction (risk instead of opportunity).
 
 ---
 
@@ -331,6 +337,9 @@ sqlite3 /root/TradingBot/database/trading.db \
 23. **`regime_match` MUST be computed before Gate 5/6** in the per-category loop — regime-aware threshold boosts only work if they're known before Gate 6 runs. Never move `regime_match` below the Gate 6 call.
 24. **Positional counter-regime = always HARD BLOCK.** No exception, no confidence override. A 3–4 week hold against the macro regime is not a paper-trading probe — it's a structural loss. The hard block lives in `signal_engine.py` before Gate 5.
 25. **BEAR_TRENDING `position_mult` = 1.0, BULL_TRENDING = 1.2.** Keep these symmetric for aligned trades. The BEAR asymmetry (0.8) was removed 2026-05-27 — don't reinstate it without reason.
+26. **Gate 5 Grade D threshold is category-aware** (`GRADE_D_OVERRIDE_CONF` dict in `gate5_sr_validator.py`). positional=68%, swing=65%, intraday=62%. Never flatten to a single float — longer hold duration in a bad S/R setup needs proportionally more conviction. Pass `category=cat` from `signal_engine.py`.
+27. **`_empty_sr()` returns Grade D / -0.2** (`SupportResistanceEngine` in `support_resistance.py`). When price data is insufficient (<30 bars), the SR engine has no information — Grade D is the honest grade, not Grade C. Returning C would silently promote no-data entries.
+28. **SHORT `near_breakout` is a risk, not an opportunity.** For LONG it's a positive confirmation (+10% size). For SHORT it's a danger signal — aggressive buyers at resistance = breakout attempt, not rollover. Penalised 0.80× in Gate 5. Never remove this asymmetry.
 
 ## Deferred (long-horizon)
 Bank Nifty futures hedging · shadow-mode deployment · Kelly sizing · `scale_pos_weight` balancing · pooled multi-ticker model with ticker embedding · P3 features (LLM earnings score, social contrarian, Google Trends alt data).

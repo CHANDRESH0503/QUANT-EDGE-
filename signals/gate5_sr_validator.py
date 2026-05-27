@@ -21,7 +21,15 @@ class Gate5SRValidator:
     Gate 5 recomputes quality for SHORT signals using the inverted distance perspective.
 
     Grade C: reduced size (65%).
-    Grade D: reduced size (40%) + requires confidence >= 65% and alignment B or better.
+    Grade D: reduced size (40%) + requires confidence ≥ category threshold and alignment B or better.
+             Category thresholds: positional=68%, swing=65%, intraday=62%.
+             20yr rule: longer hold duration in a bad S/R setup = needs proportionally
+             more conviction. A positional trade risks 3-4 weeks of adverse drift in a
+             Grade D setup; an intraday trade is out by end-of-day regardless.
+
+    SHORT near_breakout: buyers are aggressive at resistance (volume spike).
+             Shorting into a potential breakout = swimming against institutional flow.
+             Penalised 0.80× even when entry_quality is otherwise good.
     """
 
     MIN_REWARD_RISK      = 2.0   # soft floor — below this: size reduced
@@ -35,12 +43,21 @@ class Gate5SRValidator:
         "C":  0.65,
         "D":  0.40,
     }
-    GRADE_D_OVERRIDE_CONF = 0.62  # lowered 0.65→0.62 (2026-05-22 evening) — in per-category
-                                  # mode the alignment veto is dropped, so the override is the
-                                  # sole confidence gate at G5. Gate 6's per-model threshold
-                                  # still provides downstream conviction filtering, so 65%
-                                  # was double-counting safety. 0.40× sizing for D entries
-                                  # remains, so a passed Grade-D trade is a small probe.
+
+    # Category-aware Grade D confidence threshold.
+    # Grade D = far from support (LONG) or near support (SHORT) — poor entry geometry.
+    # A positional trade holds 2–4 weeks in a Grade D setup = widest possible risk window.
+    # An intraday trade has the same poor geometry but Gate 6 already enforces 65%,
+    # making this threshold non-binding for intraday (Gate 6 is tighter).
+    #
+    # 20yr rule: the worse the entry geometry, the MORE conviction you need.
+    # Grade D entries are small probes (0.40× size) — require proportionally higher
+    # confidence to justify even that small probe, especially for longer holds.
+    GRADE_D_OVERRIDE_CONF = {
+        "positional": 0.68,   # 3-4 week hold + bad S/R = needs 68%+ conviction
+        "swing":      0.65,   # 3-10 day hold + bad S/R = needs 65%+
+        "intraday":   0.62,   # Gate 6 at 65% is the binding gate for intraday D-entries
+    }
 
     def _short_quality(self, sup_dist_pct: float, res_dist_pct: float,
                        res_str: int) -> Tuple[str, float]:
@@ -67,6 +84,7 @@ class Gate5SRValidator:
         ml_confidence:    float,
         alignment:        str,
         per_category_mode:bool = False,
+        category:         str  = "swing",
     ) -> Tuple[bool, Dict]:
         """
         Validate entry quality from S/R perspective.
@@ -84,6 +102,10 @@ class Gate5SRValidator:
                               informational, never a veto. Gate 6's
                               category-specific threshold still gates the
                               signal downstream.
+            category:         "swing" | "positional" | "intraday"
+                              Used to select the category-appropriate Grade-D
+                              confidence threshold. Positional holds require
+                              higher conviction in a Grade-D S/R setup.
         """
         entry_quality   = sr_levels.get("entry_quality", "C")
         reward_risk     = float(sr_levels.get("reward_risk_sr", 1.5))
@@ -120,6 +142,7 @@ class Gate5SRValidator:
                 ),
                 "entry_quality": entry_quality,
                 "reward_risk":   reward_risk,
+                "category":      category,
                 "size_mult":     0.0,
             }
 
@@ -148,6 +171,17 @@ class Gate5SRValidator:
                 )
                 size_mult *= 0.75
 
+            if near_breakout:
+                # Breakout setups are DANGEROUS for shorts.
+                # Volume surge at resistance means BUYERS are aggressive —
+                # the stock may be about to break out, not roll over.
+                # 20yr rule: never short into a confirmed breakout volume spike.
+                reasons.append(
+                    f"Breakout volume spike at resistance — high risk for SHORT "
+                    f"({res_dist:.1f}% to resistance); buyers aggressive"
+                )
+                size_mult *= 0.80
+
         # ── R:R check ─────────────────────────────────────────────
         if reward_risk < self.MIN_REWARD_RISK:
             reasons.append(
@@ -160,21 +194,25 @@ class Gate5SRValidator:
         # In per-category mode: confidence-only gate (alignment is purely
         # informational; Gate 6's category-specific threshold is the real
         # confidence gate). In multi-model mode: also require alignment B+.
+        #
+        # Threshold is category-aware: positional (3-4 week hold) needs
+        # more conviction in a Grade-D setup than intraday (< 1 day).
         if entry_quality == "D":
-            conf_ok  = ml_confidence >= self.GRADE_D_OVERRIDE_CONF
+            grade_d_threshold = self.GRADE_D_OVERRIDE_CONF.get(category, 0.65)
+            conf_ok  = ml_confidence >= grade_d_threshold
             align_ok = per_category_mode or alignment in ("A+", "A", "B")
             if conf_ok and align_ok:
                 reasons.append(
                     f"Grade D entry — allowing at reduced size "
-                    f"(conf={ml_confidence:.0%}"
-                    + (f", per-category" if per_category_mode else f", align={alignment}")
+                    f"(conf={ml_confidence:.0%} ≥ {grade_d_threshold:.0%}"
+                    + (f", per-category [{category}]" if per_category_mode else f", align={alignment}")
                     + ")"
                 )
                 size_mult = 0.40
             else:
                 reason_bits = []
                 if not conf_ok:
-                    reason_bits.append(f"conf {ml_confidence:.0%} < {self.GRADE_D_OVERRIDE_CONF:.0%}")
+                    reason_bits.append(f"conf {ml_confidence:.0%} < {grade_d_threshold:.0%} [{category}]")
                 if not align_ok:
                     reason_bits.append(f"align {alignment} not B/A/A+")
                 return False, {
@@ -183,6 +221,7 @@ class Gate5SRValidator:
                     "reason":        "Grade D entry — " + " · ".join(reason_bits),
                     "entry_quality": entry_quality,
                     "reward_risk":   reward_risk,
+                    "category":      category,
                     "size_mult":     0.0,
                 }
 
@@ -199,6 +238,7 @@ class Gate5SRValidator:
             "near_support":     near_support,
             "near_resistance":  near_resistance,
             "near_breakout":    near_breakout,
+            "category":         category,
             "size_mult":        size_mult,
             "notes":            reasons,
         }

@@ -305,12 +305,15 @@ class SupportResistanceEngine:
         return {"A": 1.0, "B": 0.6, "C": 0.2, "D": -0.2}.get(quality, 0.0)
 
     def _empty_sr(self) -> Dict:
+        # sup_dist=5%, res_dist=5% → rr=1.0 < 1.5 → Grade D (matches _entry_quality math).
+        # Grade D score = -0.2 (from _quality_to_score). Returning "C"/0.2 was inconsistent
+        # with the actual formula and incorrectly promoted low-data entries to Grade C.
         return {
             "nearest_support": 0, "support_distance_pct": 5.0,
             "support_strength": 1, "near_support": 0,
             "nearest_resistance": 0, "resistance_distance_pct": 5.0,
             "resistance_strength": 1, "near_resistance": 0,
             "second_support": 0, "second_resistance": 0,
-            "entry_quality": "C", "entry_quality_score": 0.2,
+            "entry_quality": "D", "entry_quality_score": -0.2,
             "reward_risk_sr": 1.0, "near_breakout": 0,
         }
