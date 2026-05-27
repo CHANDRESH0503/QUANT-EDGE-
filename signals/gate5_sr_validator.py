@@ -24,7 +24,11 @@ class Gate5SRValidator:
     Grade D: reduced size (40%) + requires confidence >= 65% and alignment B or better.
     """
 
-    MIN_REWARD_RISK = 2.0
+    MIN_REWARD_RISK      = 2.0   # soft floor — below this: size reduced
+    RR_HARD_BLOCK        = 0.5   # hard floor — below this: signal blocked regardless of confidence.
+                                 # R:R < 0.5 means resistance is >2× closer than support for LONGs
+                                 # (or support >2× closer than resistance for SHORTs) — the S/R
+                                 # geometry makes the trade statistically losing before fees.
     GRADE_SIZE_MAP  = {
         "A":  1.00,
         "B":  0.85,
@@ -99,6 +103,25 @@ class Gate5SRValidator:
                 f"Gate5 SHORT quality recomputed: {entry_quality} "
                 f"(sup={sup_dist:.1f}% res={res_dist:.1f}% rr={reward_risk:.2f})"
             )
+
+        # ── Hard R:R floor ────────────────────────────────────────
+        # If S/R geometry makes the trade statistically losing (resistance <2×
+        # closer for LONG, support <2× closer for SHORT), block regardless of
+        # ML confidence. A high-confidence model cannot overcome a trade where
+        # you risk ₹5 to potentially make ₹1 from S/R perspective.
+        if reward_risk < self.RR_HARD_BLOCK:
+            return False, {
+                "gate":          5,
+                "passed":        False,
+                "reason":        (
+                    f"S/R R:R {reward_risk:.2f}:1 below hard floor "
+                    f"({self.RR_HARD_BLOCK:.1f}:1) — "
+                    f"entry geometry statistically losing"
+                ),
+                "entry_quality": entry_quality,
+                "reward_risk":   reward_risk,
+                "size_mult":     0.0,
+            }
 
         size_mult = self.GRADE_SIZE_MAP.get(entry_quality, 0.5)
         reasons   = []

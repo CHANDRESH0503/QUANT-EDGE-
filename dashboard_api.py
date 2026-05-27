@@ -1162,6 +1162,14 @@ async def live_data(
 
         # ── Order flow (computed from chart candles) ─────────────
         "order_flow": order_flow,
+
+        # ── Session config (top-level so banner JS can read it) ──
+        # capital_mode: actual mode the pipeline used this cycle.
+        # starting_capital: configured STARTING_CAPITAL (₹).
+        # is_paper_trading: True during paper phase (always True until live flag set).
+        "capital_mode":     capital_mode,
+        "starting_capital": float(os.getenv("STARTING_CAPITAL", "500000")),
+        "is_paper_trading": os.getenv("QE_PAPER_TRADING", "1") != "0",
     }))
 
 

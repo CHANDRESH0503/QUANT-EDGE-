@@ -58,15 +58,11 @@ class RiskFeatures:
             db_path:           for portfolio heat calculation
         """
         # ── Capital mode ──────────────────────────────────────────
-        if capital < 50_000:
-            cap_mode = "SMALL"
-            cap_mult = 0.5
-        elif capital < 200_000:
-            cap_mode = "GROWING"
-            cap_mult = 0.75
-        else:
-            cap_mode = "FULL"
-            cap_mult = 1.0
+        # Use CapitalMode.detect() so FORCE_CAPITAL_MODE env override is respected.
+        # Paper trading sets FORCE_CAPITAL_MODE=FULL to unlock all 3 timeframes.
+        from risk.capital_mode import CapitalMode as _CM
+        cap_mode = _CM.detect(capital)
+        cap_mult = {"SMALL": 0.5, "GROWING": 0.75, "FULL": 1.0}.get(cap_mode, 1.0)
 
         # ── Portfolio heat ────────────────────────────────────────
         heat   = self._get_portfolio_heat(db_path, capital)

@@ -862,7 +862,7 @@
       <option value="AXISBANK.NS">AXISBANK</option>
       <option value="INDUSINDBK.NS">INDUSINDBK</option>
     </select>
-    <div class="mode-badge">● SMALL CAPITAL MODE · ₹10,000</div>
+    <div class="mode-badge" id="capitalModeBadge">● PAPER TRADING · FULL MODE</div>
     <div class="badge badge-cyan" style="padding:3px 10px;font-size:9px;letter-spacing:0.1em;">6-GATE PIPELINE</div>
   </div>
   <div class="topbar-right">
@@ -3541,10 +3541,29 @@ function updateExitConditions(d) {
 // ── MASTER UPDATE ──
 function _safe(fn, d) { try { fn(d); } catch(e) { console.warn(fn.name + ' failed:', e.message); } }
 
+function updateCapitalBadge(d) {
+  const el = document.getElementById('capitalModeBadge');
+  if (!el) return;
+  // Prefer top-level capital_mode (set each cycle by signal_engine).
+  // Falls back to performance.capital_mode for backward compatibility.
+  const mode   = d.capital_mode || (d.performance && d.performance.capital_mode) || 'FULL';
+  const isPaper= d.is_paper_trading !== false;  // default true
+  const cap    = d.starting_capital || 0;
+
+  const modeColors = { FULL: 'var(--green)', GROWING: 'var(--cyan)', SMALL: 'var(--amber)' };
+  const modeLabel  = { FULL: 'FULL MODE · ALL TIMEFRAMES', GROWING: 'GROWING MODE', SMALL: 'SMALL MODE · SWING ONLY' };
+
+  const capStr = cap > 0 ? ` · ₹${(cap/100000).toFixed(1)}L` : '';
+  const prefix = isPaper ? '🧪 PAPER' : '💰 LIVE';
+  el.textContent = `${prefix} · ${modeLabel[mode] || mode}${capStr}`;
+  el.style.color = modeColors[mode] || 'var(--green)';
+}
+
 function updateDashboard(d) {
   liveData = d;
   if (d.ist) setEl('clockDate', `IST · ${d.ist}`);
   // Each update runs in isolation — one crash cannot block the chart
+  _safe(updateCapitalBadge, d);
   _safe(updatePriceHero, d);
   _safe(updateRegime, d);
   _safe(updateNews, d);

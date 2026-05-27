@@ -19,15 +19,25 @@ class Gate1Regime:
     Learning to sit on hands in a sideways market is worth more
     than any indicator. This gate enforces that discipline.
 
-    Pass conditions:
-    - BULL_TRENDING  → LONG signals only, position_mult=1.2
-    - BEAR_TRENDING  → SHORT signals only, position_mult=0.8
-    - HIGH_VOLATILITY→ Both allowed but size=0.5, strict stop management
-    - CHOPPY_SIDEWAYS→ BLOCK ALL. Return FLAT immediately.
+    Hard blocks:
+    - CHOPPY_SIDEWAYS → BLOCK ALL. Return FLAT immediately.
+    - Stability < 25% → BLOCK. Regime extremely uncertain.
+
+    Soft penalties (size reductions, never vetoes):
+    - BULL_TRENDING  → normal sizing (1.2× mult). LONGs are regime-aligned.
+                       SHORTs allowed but 0.5× via counter-regime penalty (signal_engine).
+    - BEAR_TRENDING  → reduced sizing (0.8× mult). SHORTs are regime-aligned.
+                       LONGs allowed but 0.5× via counter-regime penalty (signal_engine).
+    - HIGH_VOLATILITY→ half size (0.5×), both directions allowed.
+
+    Direction is NEVER vetoed here — this gate is called with signal_direction=None
+    so per-category counter-regime trades pass. The signal_engine applies a 0.5×
+    size penalty for counter-regime trades (LONG in BEAR, SHORT in BULL) instead.
+    See signal_engine.py: "User directive 4B".
 
     Stability threshold:
-    If regime changed within last 3 days → reduce size by 25%
-    Regime transitions are uncertain — wait for confirmation.
+    25–40%: reduce position size (LOW_STAB_MULT).
+    Recent regime changes: additional instability mult (INSTABILITY_MULT).
     """
 
     TRADEABLE = {"BULL_TRENDING", "BEAR_TRENDING", "HIGH_VOLATILITY"}

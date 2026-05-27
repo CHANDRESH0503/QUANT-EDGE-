@@ -311,6 +311,12 @@ class SignalEngine:
         # bias (e.g. swing LONG in BEAR). The Gate 1 position_mult already
         # caps size for unstable / contrarian regimes; this surface gives
         # the dashboard a complete, non-"awaiting" status for every panel.
+        #
+        # Exception — counter-regime + Grade D double-jeopardy hard block:
+        # If regime_match=False AND entry_quality=D, the signal is blocked.
+        # The S/R geometry is already unfavourable (Grade D) AND the regime
+        # is adverse — no confidence level can compensate for both risks
+        # compounding. Counter-regime Grade C or better still allowed (0.5×).
         regime_trend = self.regime_detector.get_recent_regime_trend()
         per_category   = {}
         signals_emitted = []
@@ -401,6 +407,35 @@ class SignalEngine:
                 (direction == "LONG"  and trade_long) or
                 (direction == "SHORT" and trade_short)
             )
+
+            # ── Counter-regime + Grade D hard block ──────────────
+            # Allowing a Grade-D entry in a counter-regime trade doubles the
+            # risk: the S/R geometry is already unfavourable (Grade D) AND the
+            # macro regime is adverse (0.5× size). The two penalties compound
+            # in a way that no confidence level can compensate for — the entry
+            # is both structurally poor and trend-opposed. Hard block here;
+            # Grade D counter-regime signals are probes, not real trades.
+            if g5_pass and not regime_match and g5_ctx.get("entry_quality") == "D":
+                per_category[cat] = {
+                    "category":     cat,
+                    "passed":       False,
+                    "direction":    direction,
+                    "confidence":   round(conf_b, 4),
+                    "regime_match": regime_match,
+                    "gate5":        g5_ctx,
+                    "gate6":        g6_ctx,
+                    "reason":       (
+                        f"Counter-regime {direction} in {regime_result.get('regime','?')} "
+                        f"with Grade D entry blocked — double jeopardy "
+                        f"(regime_match=False + entry_quality=D)"
+                    ),
+                }
+                logger.info(
+                    f"[{self.ticker}] {cat.upper()} BLOCKED: counter-regime + Grade D "
+                    f"({direction} in {regime_result.get('regime','?')}, "
+                    f"conf={conf_b:.0%})"
+                )
+                continue
 
             passed_all = bool(g5_pass and g6_pass)
             per_category[cat] = {

@@ -64,6 +64,17 @@ class CapitalMode:
 
     @classmethod
     def detect(cls, capital: float) -> str:
+        """Return capital mode, respecting FORCE_CAPITAL_MODE env override.
+
+        Priority:
+          1. TradingConfig.FORCE_CAPITAL_MODE (if non-empty and valid)
+          2. Auto-detection from capital amount
+        Paper trading: set FORCE_CAPITAL_MODE=FULL to unlock all timeframes.
+        """
+        from config import TradingConfig
+        forced = (TradingConfig.FORCE_CAPITAL_MODE or "").strip().upper()
+        if forced in cls.MODES:
+            return forced
         if capital < 50_000:   return "SMALL"
         if capital < 200_000:  return "GROWING"
         return "FULL"

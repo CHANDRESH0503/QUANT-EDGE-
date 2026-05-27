@@ -41,12 +41,17 @@ class TradingConfig:
     MAX_PER_NAME_PCT      = float(os.getenv("MAX_PER_NAME_PCT",  "0.40"))  # 40%
     MAX_TOTAL_EXPOSURE_PCT= float(os.getenv("MAX_EXPOSURE_PCT",  "0.80"))  # 80%
 
-    # Starting capital (₹) — update this to your actual account size
-    STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "100000"))
+    # Starting capital (₹).
+    # Paper-trading default: ₹5,00,000 (→ FULL mode, all 3 timeframes unlocked).
+    # Set STARTING_CAPITAL env var to your real account size before going live.
+    STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "500000"))
 
-    # Capital mode auto-detected but can be forced:
-    # "SMALL" = < ₹50K  | "GROWING" = ₹50K–₹2L  | "FULL" = > ₹2L
-    FORCE_CAPITAL_MODE = os.getenv("FORCE_CAPITAL_MODE", "")  # "" = auto-detect
+    # Capital mode override — skips auto-detection from STARTING_CAPITAL.
+    # Valid values: "SMALL" | "GROWING" | "FULL" | "" (empty = auto-detect).
+    # Set FORCE_CAPITAL_MODE=FULL in /etc/quantedge.env for paper trading
+    # so all three timeframes (swing + intraday + positional) are always active.
+    # Consumed by: risk/capital_mode.py → features/risk_features.py → Gate 6.
+    FORCE_CAPITAL_MODE = os.getenv("FORCE_CAPITAL_MODE", "FULL")  # paper-trading default
 
     # Signal thresholds
     MIN_CONFIDENCE_SWING      = float(os.getenv("MIN_CONF_SWING",      "0.60"))
