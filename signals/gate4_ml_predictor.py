@@ -23,43 +23,52 @@ class Gate4MLPredictor:
     One model saying LONG is a suggestion.
     All three models saying LONG simultaneously is a conviction trade.
     The alignment grade is one of the strongest meta-features
-    in the entire system. Never trade F-grade alignment.
+    in the entire system. ALL grades are INFORMATIONAL — none blocks.
 
-    Alignment grades (now INFORMATIONAL — never blocks):
-    A+: All 3 non-flat signals agree → +15% confidence, 1.2× size
-    A:  Positional + Swing agree     → +10% confidence, 1.0× size
-    B:  Any 2 agree                  → +5%  confidence, 0.85× size
-    C:  Only 1 non-flat signal       → 0%   confidence, 0.7× size
-    F:  Cross-category conflict       → -20% (no blanket block — each model runs Gate 5/6 alone)
+    Alignment grades:
+    A+: All 3 non-flat agree         → +15pp conf, 1.20× size
+    A:  Positional + Swing agree     → +10pp conf, 1.00× size
+    B:  Any 2 agree (same dir)       → +5pp  conf, 0.85× size
+    B-: 2 agree, 1 dissents (2-vs-1) → −5pp  conf, 0.75× size
+        20yr rule: if swing+positional say LONG but intraday says SHORT,
+        the two higher-timeframe models win. Mild penalty, signal proceeds.
+        This was previously Grade F which nuked all signals. Missed entries.
+    C:  Only 1 non-flat signal       →  0pp  conf, 0.70× size
+    F:  1-vs-1 direct conflict       → −20pp conf, 0.50× size
+        Only fires when exactly 1 LONG model and 1 SHORT model (no majority).
+        Genuine "wait — models fundamentally disagree" signal.
 
-    Gate 4 passes if ANY model is non-FLAT. Per-category confidence
-    thresholds are enforced downstream in Gate 6 (one call per category).
+    Gate 4 passes if ANY model is non-FLAT. Per-category thresholds
+    enforced in Gate 6 (one call per category, skip_alignment=True).
     """
 
+    # NOTE: MIN_CONF values below are DOCUMENTATION ONLY — not enforced here.
+    # Per-category thresholds live in Gate 6 (gate6_confidence.py) and are
+    # read from CapitalMode.MODES[cap_mode][timeframe]. Do not add checks here.
     MIN_CONF = {
-        "swing":      0.60,
-        "intraday":   0.65,
-        "positional": 0.55,
+        "swing":      0.60,   # Gate 6 FULL-mode reference
+        "intraday":   0.65,   # Gate 6 FULL-mode reference
+        "positional": 0.55,   # Gate 6 FULL-mode reference
     }
 
     ALIGNMENT_BOOST = {
-        "A+": 0.15,
-        "A":  0.10,
-        "B":  0.05,
-        "C":  0.00,
-        "F": -0.20,
+        "A+":  0.15,
+        "A":   0.10,
+        "B":   0.05,
+        "B-": -0.05,   # 2-vs-1 conflict: majority direction mildly penalised
+        "C":   0.00,
+        "F":  -0.20,   # 1-vs-1 conflict: genuine "wait" — penalise both sides
     }
 
     # F = 0.50 (not 0.00). Under per-category mode alignment is purely
     # informational — a hidden veto via size_mult=0 made any F-grade signal
-    # emit with shares=0/stop=0/target=0, which propagated as a "SIGNAL"
-    # alert with no actionable levels (real bug found on ICICIBANK
-    # swing-SHORT). 0.50 still penalises model disagreement (along with the
-    # -20% conf_boost) without nulling out the trade entirely.
+    # emit with shares=0/stop=0/target=0 (real bug on ICICIBANK swing-SHORT).
+    # 0.50 still penalises model disagreement without collapsing sizing to zero.
     ALIGNMENT_SIZE = {
         "A+": 1.20,
         "A":  1.00,
         "B":  0.85,
+        "B-": 0.75,   # 2-vs-1: between B (0.85) and C (0.70) — cautious but tradeable
         "C":  0.70,
         "F":  0.50,
     }
@@ -183,10 +192,13 @@ class Gate4MLPredictor:
             intra_pred["signal"],
         )
 
-        # Boosted confidences (per-category — used downstream in Gate 6)
-        swing_conf_boosted = min(0.95, swing_pred["confidence"] + conf_boost)
-        intra_conf_boosted = min(0.95, intra_pred["confidence"] + conf_boost)
-        pos_conf_boosted   = min(0.95, pos_pred["confidence"]   + conf_boost)
+        # Boosted confidences (per-category — used downstream in Gate 6).
+        # Floor at 0.0: a large negative boost (F-grade) on a low-confidence
+        # model must not produce a negative probability. Ceiling at 0.95:
+        # calibrated probabilities should never be treated as certainty.
+        swing_conf_boosted = max(0.0, min(0.95, swing_pred["confidence"] + conf_boost))
+        intra_conf_boosted = max(0.0, min(0.95, intra_pred["confidence"] + conf_boost))
+        pos_conf_boosted   = max(0.0, min(0.95, pos_pred["confidence"]   + conf_boost))
 
         # Backward-compat: surface highest-confidence non-FLAT model as "primary"
         # so legacy callers (dashboard, format_signal) keep working. Per-category
@@ -239,29 +251,64 @@ class Gate4MLPredictor:
         sw_sig:  str,
         in_sig:  str,
     ) -> Tuple[str, float, float]:
-        """Compute alignment grade, confidence boost, and size multiplier."""
+        """
+        Compute alignment grade, confidence boost, and size multiplier.
+
+        Conflict handling (20yr trader logic):
+        ─── 2-vs-1 (B-) ─────────────────────────────────────────────
+        Two models agree, one dissents. The majority has a valid directional
+        view; the minority is the outlier (often the intraday model which is
+        most susceptible to same-session noise). Mild penalty to all, majority
+        direction still proceeds. Previously this fired as Grade F (-0.20),
+        which nuked all three models' confidence below Gate 6 thresholds —
+        valid LONG signals killed by a single intraday counter-signal.
+
+        ─── 1-vs-1 (F) ──────────────────────────────────────────────
+        Exactly one model says LONG and one says SHORT (third is FLAT or
+        the two models on different timeframes directly contradict). No
+        majority — genuine "models are split, wait for resolution" signal.
+        Hard penalty (-0.20) to both. Only very high confidence (>0.80)
+        models survive F-grade and pass Gate 6.
+        """
         signals  = [pos_sig, sw_sig, in_sig]
         non_flat = [s for s in signals if s != "FLAT"]
 
         if not non_flat:
             return "C", 0.0, 0.70
 
-        # Conflict check — read multiplier from the table so the F-grade
-        # size_mult stays in one place (0.50, not 0.0). Hardcoding 0.0 here
-        # silently bypassed the ALIGNMENT_SIZE table and was the root cause
-        # of "SIGNAL emitted but stop=0 target=0" alerts.
+        # Direction conflict — split into 2-vs-1 (B-) vs balanced 1-vs-1 (F)
         if "LONG" in non_flat and "SHORT" in non_flat:
-            return "F", self.ALIGNMENT_BOOST["F"], self.ALIGNMENT_SIZE["F"]
+            long_votes  = non_flat.count("LONG")
+            short_votes = non_flat.count("SHORT")
+            if max(long_votes, short_votes) >= 2:
+                # 2 agree, 1 dissents — majority signal gets mild penalty and proceeds.
+                # Examples: sw+pos LONG, intra SHORT → B-
+                #           sw+intra SHORT, pos LONG  → B-
+                grade = "B-"
+                logger.debug(
+                    f"Alignment B-: {long_votes}×LONG vs {short_votes}×SHORT "
+                    f"— majority direction mildly penalised (−5pp, 0.75×)"
+                )
+            else:
+                # Balanced 1-vs-1: no majority — genuine conflicted signal
+                grade = "F"
+                logger.debug(
+                    f"Alignment F: 1×LONG vs 1×SHORT (third=FLAT) "
+                    f"— direct conflict, both penalised (−20pp, 0.50×)"
+                )
+            return grade, self.ALIGNMENT_BOOST[grade], self.ALIGNMENT_SIZE[grade]
 
+        # No conflict below this line (all non-flat signals agree)
         # All 3 agree
         if len(non_flat) == 3 and len(set(non_flat)) == 1:
             grade = "A+"
-        # Positional + swing agree (most important pair)
+        # Positional + swing agree — the two primary timeframes
         elif pos_sig == sw_sig and pos_sig != "FLAT":
             grade = "A"
-        # Any 2 agree
+        # Any 2 agree (e.g. swing + intraday, or positional + intraday)
         elif len(non_flat) >= 2 and len(set(non_flat)) == 1:
             grade = "B"
+        # Only 1 non-flat model
         else:
             grade = "C"
 
