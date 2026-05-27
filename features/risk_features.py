@@ -84,9 +84,11 @@ class RiskFeatures:
             _cb_thr      = _CB.THRESHOLDS.get(cap_mode, _CB.THRESHOLDS["FULL"])
             halt_thresh  = -abs(_cb_thr["halt"])
             reduce_thresh= -abs(_cb_thr["pause"])
+            warn_thresh  = -abs(_cb_thr.get("warn", 0.03))
         except Exception:
             halt_thresh   = self.MONTHLY_HALT_THRESHOLD
             reduce_thresh = self.MONTHLY_REDUCE_THRESHOLD
+            warn_thresh   = -0.03
 
         monthly_dd   = self._get_monthly_drawdown(db_path, capital)
         monthly_flag = int(monthly_dd < halt_thresh)
@@ -94,7 +96,13 @@ class RiskFeatures:
         if monthly_dd < halt_thresh:
             dd_mult = 0.0    # halt — circuit breaker triggered
         elif monthly_dd < reduce_thresh:
+            # Between pause and halt threshold — size halved
             dd_mult = 0.5
+        elif monthly_dd < warn_thresh:
+            # WARN zone: between warn% and pause% — reduce but stay tradeable.
+            # 20yr rule: a trader down 5% in the month should be reducing size,
+            # not trading full position. 0.75× reflects a cautious mode, not a halt.
+            dd_mult = 0.75
         else:
             dd_mult = 1.0
 

@@ -341,5 +341,22 @@ sqlite3 /root/TradingBot/database/trading.db \
 27. **`_empty_sr()` returns Grade D / -0.2** (`SupportResistanceEngine` in `support_resistance.py`). When price data is insufficient (<30 bars), the SR engine has no information — Grade D is the honest grade, not Grade C. Returning C would silently promote no-data entries.
 28. **SHORT `near_breakout` is a risk, not an opportunity.** For LONG it's a positive confirmation (+10% size). For SHORT it's a danger signal — aggressive buyers at resistance = breakout attempt, not rollover. Penalised 0.80× in Gate 5. Never remove this asymmetry.
 
+
+## Fixes to be done 
+G6-4 — S/R quality DOUBLE-COUNTED in sizing chain (critical)
+risk_features.py multiplies sr_mult into final_size_mult. Gate 5 already applies its own GRADE_SIZE_MAP multiplier. Both feed into size_mult_cat. Result: Grade B = 0.72× (intended 0.85×), Grade C = 0.42× (intended 0.65×), Grade D = 0.18× (intended 0.40×). Grade D signals often produce 0–1 shares → trip the position sanity guard → discarded after passing all 6 gates.
+
+G6-1 — VIX threshold is category-blind
++5pp/+10pp applies identically to all three categories. From a 20yr trader: high VIX is the source of alpha for intraday — the market moves 2–3% per session, not 0.5%. Penalizing intraday the same as positional means blocking valid same-session trades in elevated-volatility environments. Positional on the other hand should be MORE penalized at VIX >25 (holding 4 weeks through that environment is the real risk).
+
+G6-3 — WARN-level drawdown has zero effect on position size
+risk_features.py only has two bands: monthly_dd < halt_thresh (0.0×) and monthly_dd < pause_thresh (0.5×). The WARN band (e.g., −4% to −10% in FULL mode) returns dd_mult = 1.0 — no reduction. A trader who's down 7% on the month is trading at full size. The circuit breaker's own WARN definition says reduce to 0.75×, but that value never flows through.
+
+G6-2 — circuit_breaker_level is dead code in Gate 6
+gate6.check() reads risk_context.get("circuit_breaker_level", "OK") — but feature_builder.py never includes that key in risk_context. The value is always "OK". The halt actually works via trading_allowed=0, but the direct CB level check and its reason message are phantom code. Also means when CB fires, Gate 6 logs a wrong/empty reason.
+
+G6-5 — Threshold boost reason always says "+DQ boost" regardless of actual cause
+data_quality_boost carries ALL stacked boosts (counter-regime, HIGH_VOL, regime instability, fundamentals_stale, macro_stale, DQ). The reason string just says +DQ boost when the boost might actually be from a counter-regime trade. Misleading for debugging.
+
 ## Deferred (long-horizon)
 Bank Nifty futures hedging · shadow-mode deployment · Kelly sizing · `scale_pos_weight` balancing · pooled multi-ticker model with ticker embedding · P3 features (LLM earnings score, social contrarian, Google Trends alt data).
