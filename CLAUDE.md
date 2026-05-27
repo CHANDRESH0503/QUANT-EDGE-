@@ -17,7 +17,7 @@ One `SignalEngine` per bank; all 3 categories evaluated each cycle. Pre-Gate-1: 
 
 | Gate | Name | Scope | Logic |
 |------|------|-------|-------|
-| 1 | Regime | per-bank | CHOPPY → block. Stability <25% → block. Direction never vetoes per-category (informational). |
+| 1 | Regime | per-bank | CHOPPY → block. Stability <25% → block. `regime_match` computed BEFORE Gate 5/6 so threshold boosts apply. Aligned trades: normal threshold + full size. Counter-regime positional: HARD BLOCK. Counter-regime swing: +7pp Gate 6. Counter-regime intraday: +10pp Gate 6. HIGH_VOL (any dir): +5pp Gate 6. Counter-regime size penalty: 0.5×. |
 | 2 | Rule Filter | per-bank | 11 checks, need 8+. Hard fails: earnings <3d, VIX ≥28, anomaly HIGH. Fundamentals DEFAULTED → soft-pass + bubble `fundamentals_stale`. |
 | 3 | Universe Rank | global | Ranks 5 banks; size_mult by rank. Disqualifies on falling-knife score <−5. 2-min TTL cache. |
 | 4 | ML Models | per-bank | Passes iff ≥1 model non-FLAT. Alignment INFORMATIONAL — boosts conf+size, never vetoes. |
@@ -28,8 +28,9 @@ One `SignalEngine` per bank; all 3 categories evaluated each cycle. Pre-Gate-1: 
 
 **Capital-mode `allowed_tf` enforced** at signal_engine AND `_open_paper_trades` (SMALL=swing · GROWING=swing+intra · FULL=all). Disallowed categories return structured FLAT with reason for dashboard.
 
-**Counter-regime trades** (LONG in BEAR / SHORT in BULL) allowed at 0.5× size.
-**Counter-regime + Grade D double-jeopardy hard block** — if `regime_match=False` AND `entry_quality=D`, the category is blocked regardless of confidence. Two compounding risk factors that no ML confidence can compensate for.
+**Counter-regime trades:** positional always blocked. Swing/intraday allowed at 0.5× size with raised Gate 6 threshold (+7pp/+10pp). `regime_match` evaluated BEFORE Gate 5/6 so threshold boost is baked in — Gate 6 is no longer regime-blind.
+**Counter-regime + Grade D double-jeopardy hard block** — if `regime_match=False` AND `entry_quality=D`, the category is blocked regardless of confidence.
+**BEAR_TRENDING `position_mult` = 1.0** (symmetric with BULL_TRENDING = 1.2). Aligned BEAR SHORTs no longer penalised vs aligned BULL LONGs.
 
 ---
 
@@ -84,6 +85,12 @@ DD multipliers (mode-aware, shared with `CircuitBreaker.THRESHOLDS`): SMALL halt
 **PT-4 — Dashboard capital mode banner.** `tradingDashboard.html` had `● SMALL CAPITAL MODE · ₹10,000` hardcoded (line 865). Replaced with dynamic `id=capitalModeBadge` element; `updateCapitalBadge()` JS function reads `capital_mode` + `is_paper_trading` + `starting_capital` from the API response (exposed at top-level in `dashboard_api.py`). Now shows `🧪 PAPER · FULL MODE · ALL TIMEFRAMES · ₹X.XL` during paper phase; switches to `💰 LIVE` when `QE_PAPER_TRADING=0`.
 
 **PT-5 — Gate 1 docstring corrected.** Docstring claimed "BEAR_TRENDING → SHORT signals only" — completely wrong since "User directive 4B" was implemented (Gate 1 called with `signal_direction=None`, direction check is dead code). Rewritten to document actual behavior: hard blocks only on CHOPPY + low stability; all other regimes apply size multipliers; counter-regime trades penalized 0.5× in `signal_engine.py` not here.
+
+**G1-1 — Gate 6 was regime-blind (root cause of BEAR+LONG issue).** `regime_match` was computed AFTER Gate 6 in the per-category loop — Gate 6 used the same 60% threshold for aligned and counter-regime trades, making size the ONLY penalty for fighting the trend. Moved `regime_match` before Gate 5/6 so threshold boosts take effect before the signal is evaluated. Counter-regime swing: +7pp. Counter-regime intraday: +10pp. HIGH_VOL aligned: +5pp. All stack with existing dq/macro/fundamentals boosts (capped +15pp).
+
+**G1-2 — Positional counter-regime hard block.** 2–4 week positional hold against confirmed BEAR (or SHORT in BULL) was only penalised at 0.4× size before. Hard block added in signal_engine per-category loop before Gate 5 — no confidence threshold compensates for a multi-week hold against the macro regime. Applies to all 5 banks.
+
+**G1-3 — BEAR position_mult asymmetry fixed.** `REGIME_RULES["BEAR_TRENDING"]["position_mult"]` was 0.8, meaning a confirmed-regime SHORT in BEAR got 0.8× size while a confirmed-regime LONG in BULL got 1.2×. Asymmetric and unfair to aligned SHORTs. Changed to 1.0 — symmetric baseline for aligned trades in either trending regime.
 
 ---
 
@@ -297,6 +304,9 @@ sqlite3 /root/TradingBot/database/trading.db \
 20. **Gate 5 S/R R:R hard floor = 0.5** (`RR_HARD_BLOCK` in `gate5_sr_validator.py`). R:R below 0.5:1 is a hard block regardless of confidence. Soft size-penalty only for 0.5–2.0 range. Don't lower this floor — it prevents statistically losing entry geometry.
 21. **Counter-regime + Grade D = hard block** (`signal_engine.py` per-category loop). If `regime_match=False` AND `entry_quality=D`, reject the category before sizing. Counter-regime trades need at least Grade C entry quality to proceed (at 0.5× size).
 22. **`FORCE_CAPITAL_MODE` must be explicitly unset (or set to `""`) before going live.** Currently defaults to `"FULL"` for paper trading. Leaving it as `"FULL"` in production would remove risk-of-ruin guardrails that SMALL/GROWING modes enforce on small accounts.
+23. **`regime_match` MUST be computed before Gate 5/6** in the per-category loop — regime-aware threshold boosts only work if they're known before Gate 6 runs. Never move `regime_match` below the Gate 6 call.
+24. **Positional counter-regime = always HARD BLOCK.** No exception, no confidence override. A 3–4 week hold against the macro regime is not a paper-trading probe — it's a structural loss. The hard block lives in `signal_engine.py` before Gate 5.
+25. **BEAR_TRENDING `position_mult` = 1.0, BULL_TRENDING = 1.2.** Keep these symmetric for aligned trades. The BEAR asymmetry (0.8) was removed 2026-05-27 — don't reinstate it without reason.
 
 ## Deferred (long-horizon)
 Bank Nifty futures hedging · shadow-mode deployment · Kelly sizing · `scale_pos_weight` balancing · pooled multi-ticker model with ticker embedding · P3 features (LLM earnings score, social contrarian, Google Trends alt data).
