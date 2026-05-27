@@ -11,26 +11,40 @@ logger = logging.getLogger(__name__)
 
 class Gate2RuleFilter:
     """
-    Gate 2: 11-condition pre-ML sanity filter.
+    Gate 2: 11-condition pre-ML sanity filter (regime-aware).
 
     20yr trader checklist before any trade:
     1.  Trend exists           → ADX > 18 or |EMA spread| > 1%
     2.  Volume confirming      → volume_ratio ≥ 0.7x average
     3.  Market direction ok    → Nifty 5d in line with regime direction
     4.  Not within 3d earnings → hard block (5d = soft warn, handled by size)
-    5.  Fundamentals ok        → grade not POOR / UNKNOWN
+    5.  Fundamentals ok        → BULL: grade not POOR/UNKNOWN
+                                  BEAR: POOR = PASS (confirms short thesis); UNKNOWN → fail
     6.  No severe anomaly      → HARD FAIL on HIGH severity
     7.  VIX not at halt level  → HARD FAIL only at VIX ≥ 28 (HALT_AND_FLATTEN)
                                   VIX 25-28 allowed — Gate 6 raises threshold +10pp
-    8.  Macro not hostile      → macro_score > -0.5
-    9.  Intermarket aligned    → intermarket_score > -0.4
-    10. Rupee not collapsing   → usdinr_5d_pct < +2%
+    8.  Macro not hostile      → BULL: macro_score > -0.5
+                                  BEAR: passes if macro < 0.5 (hostile macro CONFIRMS short)
+                                  HIGH_VOL: wider range > -0.7
+                                  Stale macro data → treated as neutral (0.0)
+    9.  Intermarket aligned    → BULL: im_score > -0.4
+                                  BEAR: passes if im < 0.5 (global risk-off CONFIRMS short)
+                                  HIGH_VOL: wider range > -0.6
+    10. Rupee not collapsing   → BULL: usdinr_5d_pct < +2%
+                                  BEAR: < +3.5% (FII selling = CONFIRMS short; only extreme collapse blocks)
+                                  HIGH_VOL: < +2.5%
     11. Not RBI decision day   → days_to_rbi > 0 (soft avoid only)
 
     Minimum pass threshold: 8 of 11 checks.
     HARD_FAILS fire regardless of n_passed — single hard fail = FLAT.
     Check 11 (RBI day) never triggers HARD_FAIL but does reduce n_passed by 1
     on an MPC decision day — size is also cut to 0.4× via macro_event_mult.
+
+    BEAR-regime logic (20yr rule): hostile macro, global risk-off, and rupee
+    stress are NOT headwinds when you're already short — they ARE the catalyst.
+    Blocking shorts on those checks in a confirmed BEAR is a type-II error that
+    costs more than it saves. Surface confirmation flags in return dict so the
+    dashboard can explain WHY a "hostile environment" check passed.
     """
 
     MIN_PASSES = 8       # out of 11 — allows one extra check to fail due to sparse data
@@ -103,20 +117,32 @@ class Gate2RuleFilter:
             reasons.append(f"Earnings in {int(days_earn)}d — hard block within 3 days")
 
         # ── Check 5: Fundamentals acceptable ─────────────────────
-        # POOR / UNKNOWN  → hard fail.
-        # DEFAULTED       → pass (don't paralyse trading on a fresh DB) but
+        # BULL: POOR / UNKNOWN  → hard fail (don't long a fundamentally bad stock).
+        # BEAR: POOR → PASS with `fundamentals_bear_confirm=True`.
+        #       A weak balance sheet CONFIRMS the short thesis in a BEAR regime —
+        #       20-yr rule: you WANT the stock you short to be fundamentally fragile.
+        #       UNKNOWN → always fail (data quality issue, not a directional view).
+        # DEFAULTED       → pass in all regimes (fresh DB — don't paralyse trading)
         #                    surface `fundamentals_stale=True` so the per-category
         #                    pipeline can lift the positional Gate-6 threshold.
         # Everything else → pass.
         fund_grade = context.get("fundamental_grade", "GOOD")
-        fund_ok    = fund_grade not in ("POOR", "UNKNOWN")
+        if is_bear:
+            fund_ok = fund_grade != "UNKNOWN"   # POOR is confirmation in BEAR
+        else:
+            fund_ok = fund_grade not in ("POOR", "UNKNOWN")
         checks["fundamentals_ok"] = fund_ok
         if not fund_ok:
             reasons.append(f"Poor fundamental grade: {fund_grade}")
-        fundamentals_stale = fund_grade == "DEFAULTED"
+        fundamentals_stale        = fund_grade == "DEFAULTED"
+        fundamentals_bear_confirm = is_bear and fund_grade == "POOR"
         if fundamentals_stale:
             reasons.append(
                 "Fundamentals DEFAULTED (no DB rows) — positional threshold +5pp"
+            )
+        if fundamentals_bear_confirm:
+            reasons.append(
+                "Fundamentals POOR in BEAR regime — confirms short thesis ✓"
             )
 
         # ── Check 6: No high-severity anomaly ────────────────────
@@ -136,26 +162,85 @@ class Gate2RuleFilter:
         if not vix_ok:
             reasons.append(f"VIX HALT level: {vix:.1f} ≥ 28 — flatten all positions")
 
-        # ── Check 8: Macro not hostile ────────────────────────────
-        macro_score = float(raw_features.get("macro_score", 0))
-        macro_ok    = macro_score > -0.5
+        # ── Check 8: Macro (regime-aware) ────────────────────────
+        # BULL : hostile macro (< -0.5) is a headwind for longs → FAIL.
+        # BEAR : hostile macro CONFIRMS the short thesis → PASS.
+        #        Only fail in BEAR when macro is strongly positive (> 0.5) —
+        #        a surging global environment undercuts the BEAR narrative.
+        # HIGH_VOL: wider range (-0.7) — noisy environment, both sides valid.
+        # Stale macro: treat as neutral (0.0) so stale data never blocks a
+        #   trade. Gate 6 already adds +5pp via DEGRADED quality when stale.
+        macro_score      = float(raw_features.get("macro_score", 0))
+        macro_stale_flag = int(raw_features.get("macro_stale", 0)) == 1
+        macro_eff        = 0.0 if macro_stale_flag else macro_score  # neutral when stale
+
+        if is_bear:
+            macro_ok = macro_eff < 0.5       # fail only if macro strongly bullish (headwind for shorts)
+        elif regime == "HIGH_VOLATILITY":
+            macro_ok = macro_eff > -0.7      # slightly wider — both directions valid in HIGH_VOL
+        else:
+            macro_ok = macro_eff > -0.5      # BULL: original behaviour
+
         checks["macro_ok"] = macro_ok
+        macro_bear_confirm = is_bear and macro_score < -0.5  # hostile macro in BEAR = confirmation
         if not macro_ok:
-            reasons.append(f"Hostile macro: score={macro_score:.2f}")
+            if is_bear:
+                reasons.append(f"Macro too bullish in BEAR: score={macro_eff:.2f} > 0.5 — headwind for shorts")
+            else:
+                reasons.append(f"Hostile macro: score={macro_eff:.2f}")
+        elif macro_bear_confirm:
+            reasons.append(f"Hostile macro confirms BEAR thesis: score={macro_score:.2f} ✓")
 
-        # ── Check 9: Intermarket aligned ─────────────────────────
+        # ── Check 9: Intermarket (regime-aware) ──────────────────
+        # BULL : global headwinds (< -0.4) fight LONG bias → FAIL.
+        # BEAR : global headwinds CONFIRM the SHORT thesis → PASS.
+        #        Fail only when intermarket is very positive (> 0.5) — risk-on
+        #        environment globally undercuts the BEAR bank narrative.
+        # HIGH_VOL: wider range (-0.6) — noisy cross-asset environment.
         im_score = float(raw_features.get("intermarket_score", 0))
-        im_ok    = im_score > -0.4
-        checks["intermarket_ok"] = im_ok
-        if not im_ok:
-            reasons.append(f"Intermarket headwinds: score={im_score:.2f}")
 
-        # ── Check 10: Rupee not collapsing ────────────────────────
+        if is_bear:
+            im_ok = im_score < 0.5           # fail only if very bullish globally
+        elif regime == "HIGH_VOLATILITY":
+            im_ok = im_score > -0.6          # slightly wider
+        else:
+            im_ok = im_score > -0.4          # BULL: original behaviour
+
+        checks["intermarket_ok"] = im_ok
+        intermarket_bear_confirm = is_bear and im_score < -0.4  # negative IM in BEAR = confirmation
+        if not im_ok:
+            if is_bear:
+                reasons.append(f"Intermarket too bullish in BEAR: score={im_score:.2f} > 0.5")
+            else:
+                reasons.append(f"Intermarket headwinds: score={im_score:.2f}")
+        elif intermarket_bear_confirm:
+            reasons.append(f"Intermarket risk-off confirms BEAR thesis: score={im_score:.2f} ✓")
+
+        # ── Check 10: Rupee (regime-aware) ───────────────────────
+        # BULL : rupee collapse (≥ 2%) drives FII selling, hurts longs → FAIL.
+        # BEAR : rupee stress CONFIRMS the bearish environment for banks.
+        #        FII selling + rupee stress = exactly why you short banks in BEAR.
+        #        Only fail on extreme collapse (≥ 3.5%) where execution quality
+        #        degrades sharply (wide spreads, thin liquidity).
+        # HIGH_VOL: slightly wider threshold (2.5%) — some rupee stress is normal.
         usdinr_5d = float(raw_features.get("usdinr_5d_pct", 0))
-        rupee_ok  = usdinr_5d < 2.0
+
+        if is_bear:
+            rupee_ok = usdinr_5d < 3.5       # extreme collapse only (execution quality)
+        elif regime == "HIGH_VOLATILITY":
+            rupee_ok = usdinr_5d < 2.5       # slightly wider
+        else:
+            rupee_ok = usdinr_5d < 2.0       # BULL: original behaviour
+
         checks["rupee_ok"] = rupee_ok
+        rupee_bear_confirm = is_bear and usdinr_5d >= 2.0  # rupee stress in BEAR = FII selling
         if not rupee_ok:
-            reasons.append(f"Rupee stress: USD/INR +{usdinr_5d:.1f}% in 5 days")
+            reasons.append(
+                f"Rupee {'extreme' if is_bear else ''} stress: "
+                f"USD/INR +{usdinr_5d:.1f}% in 5 days"
+            )
+        elif rupee_bear_confirm:
+            reasons.append(f"Rupee stress ({usdinr_5d:+.1f}%) confirms BEAR via FII selling ✓")
 
         # ── Check 11: Not RBI decision day (soft fail only) ───────
         # Soft avoid on the MPC decision day itself (days_to_rbi == 0).
@@ -185,4 +270,12 @@ class Gate2RuleFilter:
             "vix_level":          vix,
             "fundamentals_stale": fundamentals_stale,
             "fundamental_grade":  fund_grade,
+            # ── Bear-regime confirmation flags ─────────────────────────
+            # These appear in the dashboard to explain why hostile macro /
+            # weak fundamentals / rupee stress registered as PASS in BEAR.
+            "macro_stale":              macro_stale_flag,
+            "fundamentals_bear_confirm": fundamentals_bear_confirm,
+            "macro_bear_confirm":       macro_bear_confirm,
+            "intermarket_bear_confirm": intermarket_bear_confirm,
+            "rupee_bear_confirm":       rupee_bear_confirm,
         }

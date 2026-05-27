@@ -16,24 +16,35 @@ logger = logging.getLogger(__name__)
 
 class Gate3UniverseRank:
     """
-    Gate 3: Is HDFC Bank the strongest in the banking sector?
+    Gate 3: Best bank stock within the universe for the current regime.
 
     20yr trader principle:
-    Never trade a stock that is underperforming its peers.
-    If ICICI Bank is surging and HDFC is flat — money is
-    flowing into ICICI specifically. Trade ICICI, not HDFC.
-    Relative strength within a sector is free alpha.
+    LONG: Never trade a stock that is underperforming its peers.
+          Trade the STRONGEST bank — money is flowing there.
+    SHORT: Never short the strongest stock in a falling sector.
+           Short the WEAKEST bank — that's where the breakdown is.
+    Relative strength within a sector is free alpha in BOTH directions.
 
-    Ranking factors:
-    1. 5-day momentum        (40%) — most important
-    2. Relative strength vs Bank Nifty (30%)
-    3. RSI zone (40-65 = sweet spot) (20%)
-    4. Volume trend           (10%)
+    Ranking factors (regime-aware):
+    ─── BULL / LONG ─────────────────────────────────────
+    1. 5-day momentum         (40%) — strongest upward mover
+    2. Relative strength vs BankNifty (30%)
+    3. RSI zone 40–65 = sweet spot  (20%) — momentum not overbought
+    4. Volume trend            (10%)
+    ─── BEAR / SHORT ────────────────────────────────────
+    1. Most NEGATIVE 5d momentum  (40%) — weakest stock = best short
+    2. Most NEGATIVE RS vs BankNifty (30%) — sector laggard
+    3. RSI zone: ≥65 OR ≤35 = sweet spot (20%)
+       - ≥65 (extended = bear-flag setup), ≤35 (confirmed breakdown)
+    4. Volume trend            (10%) — same; high vol on down = conviction
 
-    Action:
-    - HDFC rank 1 or 2 → continue with HDFC
-    - HDFC rank 3+ → suggest switching to rank 1 stock
-    - Gate still PASSES but alerts trader to better opportunity
+    Action (BULL):
+    - Ticker rank 1 or 2 → trade this stock (strongest)
+    - Ticker rank 3+ → suggest switching to rank-1
+
+    Action (BEAR):
+    - Ticker rank 1 or 2 → trade this stock (weakest = best short)
+    - Ticker rank 3+ → suggest switching to rank-1 (weakest)
     """
 
     # Universe from config — 5 private banks only (SBI excluded: PSU dynamics differ)
@@ -62,7 +73,8 @@ class Gate3UniverseRank:
     def check(
         self,
         hdfc_features: Dict,
-        ticker: str = None,
+        ticker: str   = None,
+        regime: str   = "BULL_TRENDING",
     ) -> Tuple[bool, Dict]:
         """
         Rank all 5 banks and return size_mult for the requested ticker.
@@ -70,10 +82,16 @@ class Gate3UniverseRank:
         Gate always passes — it never blocks a signal — but:
         - Assigns a rank-based size_mult so position sizing reflects RS.
         - Flags banks below MIN_SCORE_THRESHOLD (size_mult = 0 means skip).
-        - Recommends switching to rank-1 when the requested ticker is weak.
+        - Recommends switching to rank-1 when the requested ticker is sub-optimal.
+
+        Regime-aware:
+        - BULL: rank-1 = strongest (best LONG candidate) → most size.
+        - BEAR: score is inverted so rank-1 = weakest (best SHORT candidate) → most size.
+        - HIGH_VOL: uses BULL-style scoring (both directions valid; rank by absolute momentum).
         """
-        ticker = ticker or self.PRIMARY_TICKER
-        rankings = self._rank_stocks()
+        ticker    = ticker or self.PRIMARY_TICKER
+        is_bear   = regime == "BEAR_TRENDING"
+        rankings  = self._rank_stocks(regime)
         if not rankings:
             return True, {
                 "gate":           3,
@@ -82,6 +100,7 @@ class Gate3UniverseRank:
                 "hdfc_rank":      1,
                 "ticker_rank":    1,
                 "size_mult":      1.0,
+                "regime":         regime,
                 "reason":         "Universe ranking unavailable — defaulting",
                 "rankings":       [],
             }
@@ -97,7 +116,10 @@ class Gate3UniverseRank:
         best_name   = rankings[0]["name"]
         best_score  = rankings[0]["score"]
 
-        # Disqualify if far below peers (falling knife filter)
+        # Disqualify if score is far from tradeable range.
+        # In BULL: score < -5 = stock crashing vs peers (falling knife).
+        # In BEAR: score < -5 = stock is STRONGLY RISING vs peers = worst short
+        #          candidate (potential short-squeeze risk — avoid).
         if ticker_score < self.MIN_SCORE_THRESHOLD:
             return True, {
                 "gate":           3,
@@ -107,12 +129,25 @@ class Gate3UniverseRank:
                 "ticker_rank":    ticker_rank,
                 "size_mult":      0.0,
                 "disqualified":   True,
-                "reason":         f"{ticker} score {ticker_score:.1f} < threshold {self.MIN_SCORE_THRESHOLD} — skip",
+                "regime":         regime,
+                "reason":         (
+                    f"{ticker} score {ticker_score:.1f} < {self.MIN_SCORE_THRESHOLD} — "
+                    f"{'short-squeeze risk (rising in BEAR)' if is_bear else 'falling knife vs peers'}"
+                ),
                 "rankings":       rankings,
             }
 
         size_mult    = self.RANK_SIZE_MULT.get(ticker_rank, 0.40)
-        should_switch= hdfc_rank > 2
+        # should_switch = True when this bank is not a top-2 candidate.
+        # In BULL: top-2 = strongest (best LONGs). In BEAR: top-2 = weakest (best SHORTs).
+        # Use ticker_rank (not hdfc_rank) — each bank's engine should flag itself.
+        should_switch = ticker_rank > 2
+
+        regime_label = "weakest (best short)" if is_bear else "strongest (best long)"
+        ticker_short  = ticker.replace(".NS", "")
+        switch_label = (
+            f"{ticker_short} ranked #{ticker_rank} — {best_name} is the {regime_label} today"
+        ) if should_switch else None
 
         return True, {
             "gate":           3,
@@ -125,51 +160,70 @@ class Gate3UniverseRank:
             "best_score":     round(best_score, 2),
             "should_switch":  should_switch,
             "size_mult":      size_mult,
+            "regime":         regime,
             "primary_ticker": best_ticker if should_switch else self.PRIMARY_TICKER,
-            "switch_reason":  (
-                f"HDFC Bank ranked #{hdfc_rank} — {best_name} is stronger today"
-            ) if should_switch else None,
+            "switch_reason":  switch_label,
             "rankings":       rankings,
         }
 
-    def get_top_tickers(self, n: int = 5) -> List[str]:
+    def get_top_tickers(self, n: int = 5, regime: str = "BULL_TRENDING") -> List[str]:
         """
         Return all banks that pass the minimum score filter, ranked by RS.
         n caps the list but all 5 are evaluated by default.
 
+        In BULL: returns strongest-first (best LONGs at the top).
+        In BEAR: returns weakest-first after score inversion (best SHORTs at the top).
+        The rank-based size_mult in check() handles risk, not this list.
+
         20yr principle: scan ALL qualified names — missing a great setup in
         a rank-3 bank because of an arbitrary cutoff is opportunity cost.
-        The rank-based size_mult in check() handles risk, not this list.
         """
-        rankings = self._rank_stocks()
+        rankings = self._rank_stocks(regime)
         if not rankings:
             return [self.PRIMARY_TICKER]
         qualified = [r["ticker"] for r in rankings
                      if r["score"] >= self.MIN_SCORE_THRESHOLD]
         return qualified[:n] if qualified else [self.PRIMARY_TICKER]
 
-    # Process-wide cache: yfinance hits + ranking math are expensive and the
-    # universe ranking is identical for every bank in the same cycle. One
-    # cache for all Gate3UniverseRank instances; TTL matched to the orchestrator's
-    # full-pipeline interval (5 banks should hit yfinance once per cycle, not 5×).
-    _RANK_CACHE: tuple = (0.0, [])   # (epoch, rankings)
-    _RANK_TTL_SEC: float = 120.0     # 2 min — well under FULL_INTERVAL but > one cycle
+    # Process-wide cache keyed by regime — yfinance hits + ranking math are
+    # expensive. All 5 SignalEngines in a cycle share the same regime in practice.
+    # TTL matched to the orchestrator's full-pipeline interval so one cycle does
+    # 6 yfinance calls (BankNifty + 5 banks) per regime, not 30×.
+    _RANK_CACHE: Dict  = {}           # {regime: (epoch, rankings)}
+    _RANK_TTL_SEC: float = 120.0      # 2 min
 
-    def _rank_stocks(self) -> List[Dict]:
+    def _rank_stocks(self, regime: str = "BULL_TRENDING") -> List[Dict]:
         """
         Fetch peer prices and compute composite ranking score.
-        Memoised across all Gate3UniverseRank instances for `_RANK_TTL_SEC`
-        seconds so a 5-bank cycle does 6 yfinance calls (Bank Nifty + 5 banks)
-        ONCE per cycle instead of 30×. Cache invalidates after TTL.
+
+        Regime-aware scoring (memoised per-regime):
+        ─── BULL / HIGH_VOL ──────────────────────────────────
+          score = (+mom_5d × 0.40) + (+rs_bn × 0.30)
+                + rsi_long_zone × 20 × 0.20 + vol_trend × 10 × 0.10
+          rank-1 = strongest (best LONG candidate)
+
+        ─── BEAR ─────────────────────────────────────────────
+          score = (−mom_5d × 0.40) + (−rs_bn × 0.30)
+                + rsi_short_zone × 20 × 0.20 + vol_trend × 10 × 0.10
+          SIGNS INVERTED so the most-negative-momentum stock scores highest.
+          rank-1 = weakest (best SHORT candidate)
+
+          RSI short zone (BEAR): ≥65 (extended = bear-flag) OR ≤35 (confirmed
+          breakdown). Both are valid short entries. Neutral RSI 45-65 scores 0.
+
+          Disqualification in BEAR: score < -5 means the stock is RISING
+          strongly vs peers — short-squeeze risk, avoid.
         """
         import time as _time
-        ts, cached = Gate3UniverseRank._RANK_CACHE
-        if cached and (_time.time() - ts) < Gate3UniverseRank._RANK_TTL_SEC:
-            return cached
+        is_bear = regime == "BEAR_TRENDING"
+
+        cached_ts, cached_list = Gate3UniverseRank._RANK_CACHE.get(regime, (0.0, []))
+        if cached_list and (_time.time() - cached_ts) < Gate3UniverseRank._RANK_TTL_SEC:
+            return cached_list
 
         rankings = []
         try:
-            # Fetch Bank Nifty for relative strength calculation
+            # Fetch Bank Nifty for relative-strength baseline
             bn_df = yf_safe_download("^NSEBANK", period="30d")
             bn_5d = float(bn_df["Close"].pct_change(5).iloc[-1] * 100) \
                     if not bn_df.empty else 0.0
@@ -180,27 +234,44 @@ class Gate3UniverseRank:
                     if df.empty or len(df) < 10:
                         continue
 
-                    close   = df["Close"]
-                    volume  = df["Volume"]
+                    close  = df["Close"]
+                    volume = df["Volume"]
 
-                    mom_5d  = float(close.pct_change(5).iloc[-1] * 100)
-                    mom_20d = float(close.pct_change(20).iloc[-1] * 100)
-                    rs_bn   = mom_5d - bn_5d
-                    rsi     = self._rsi(close)
-                    rsi_zone= 1.0 if 40 <= rsi <= 65 else (
-                              0.5 if 35 <= rsi <= 70 else 0.0
-                    )
-                    vol_tr  = float(
+                    mom_5d = float(close.pct_change(5).iloc[-1] * 100)
+                    rs_bn  = mom_5d - bn_5d
+                    rsi    = self._rsi(close)
+                    vol_tr = float(
                         volume.rolling(5).mean().iloc[-1] /
                         (volume.rolling(20).mean().iloc[-1] + 1e-8)
                     )
 
-                    score = (
-                        mom_5d  * 0.40 +
-                        rs_bn   * 0.30 +
-                        rsi_zone* 20 * 0.20 +   # scale to similar range
-                        (vol_tr - 1) * 10 * 0.10
-                    )
+                    if is_bear:
+                        # BEAR: invert momentum/RS signs so the WEAKEST stock ranks #1.
+                        # RSI sweet spot: ≥65 (overbought/extended = bear-flag setup)
+                        # OR ≤35 (confirmed breakdown = momentum short). Neutral = 0.
+                        rsi_zone = (
+                            1.0 if (rsi >= 65 or rsi <= 35) else
+                            (0.5 if (rsi >= 55 or rsi <= 45) else 0.0)
+                        )
+                        score = (
+                            (-mom_5d) * 0.40 +     # falling stock scores higher
+                            (-rs_bn)  * 0.30 +     # sector laggard scores higher
+                            rsi_zone  * 20 * 0.20 +
+                            (vol_tr - 1) * 10 * 0.10
+                        )
+                    else:
+                        # BULL / HIGH_VOL: original scoring — strongest stock ranks #1.
+                        # RSI sweet spot: 40-65 (momentum zone, not overbought).
+                        rsi_zone = (
+                            1.0 if 40 <= rsi <= 65 else
+                            (0.5 if 35 <= rsi <= 70 else 0.0)
+                        )
+                        score = (
+                            mom_5d  * 0.40 +
+                            rs_bn   * 0.30 +
+                            rsi_zone * 20 * 0.20 +
+                            (vol_tr - 1) * 10 * 0.10
+                        )
 
                     rankings.append({
                         "ticker":    ticker,
@@ -210,6 +281,7 @@ class Gate3UniverseRank:
                         "rs_bn":     round(rs_bn, 2),
                         "rsi":       round(rsi, 1),
                         "vol_trend": round(vol_tr, 2),
+                        "regime":    regime,
                     })
 
                 except Exception as e:
@@ -220,9 +292,9 @@ class Gate3UniverseRank:
         except Exception as e:
             logger.warning(f"Universe ranking error: {e}")
 
-        # Stamp the cache so subsequent banks in the same cycle reuse this work.
+        # Stamp the per-regime cache
         if rankings:
-            Gate3UniverseRank._RANK_CACHE = (_time.time(), rankings)
+            Gate3UniverseRank._RANK_CACHE[regime] = (_time.time(), rankings)
         return rankings
 
     def _rsi(self, close: pd.Series, window: int = 14) -> float:

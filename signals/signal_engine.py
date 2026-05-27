@@ -215,7 +215,13 @@ class SignalEngine:
         reasons.append(f"Rules: {g2_ctx['n_passed']}/{g2_ctx.get('n_total',11)} ✓")
 
         # ── Gate 3: Universe ranking ───────────────────────────────
-        g3_pass, g3_ctx = self.gate3.check(raw, ticker=self.ticker)
+        # Regime is passed so Gate 3 can apply BEAR-aware scoring:
+        # in BEAR, rank-1 = weakest bank (best short) not strongest (best long).
+        g3_pass, g3_ctx = self.gate3.check(
+            raw,
+            ticker=self.ticker,
+            regime=regime_result.get("regime", "BULL_TRENDING"),
+        )
         gate_results["gate3"] = g3_ctx
 
         # Falling knife: score too far below peers — skip this cycle
@@ -754,6 +760,9 @@ class SignalEngine:
 
         At most one open trade per cycle (demo phase constraint).
         """
+        # Pre-screen tickers using neutral regime — each per-ticker engine below
+        # runs the full pipeline with its own regime-aware Gate 3 check, so the
+        # actual size_mult and ranking for each bank's signal is correctly computed.
         top_tickers = self.gate3.get_top_tickers(n=TradingConfig.UNIVERSE_TOP_N)
         logger.info(f"Universe scan: evaluating {top_tickers}")
 
