@@ -64,9 +64,22 @@ class ExitEngine:
         """
         positions = self._get_open_positions(ticker=ticker)
         results   = []
+        today     = datetime.now().date()
 
         for pos in positions:
-            result = self._check_gap_fill(pos, open_price) if open_price else None
+            # Gap-fill only applies to positions held OVERNIGHT — comparing
+            # today's open to the stop is meaningless for a position opened
+            # intraday today (it didn't exist at the open). P1-3.
+            held_overnight = False
+            try:
+                _oa = datetime.strptime(str(pos.get("opened_at"))[:19],
+                                        "%Y-%m-%d %H:%M:%S").date()
+                held_overnight = _oa < today
+            except Exception:
+                held_overnight = False
+
+            result = (self._check_gap_fill(pos, open_price)
+                      if (open_price and held_overnight) else None)
             if result and result["should_exit"]:
                 results.append(result)
                 logger.warning(
@@ -142,6 +155,7 @@ class ExitEngine:
         size_mult:   float = 1.0,
         atr_at_entry: float = 0.0,
         reward_risk: float = 0.0,
+        max_hold_days: int  = 0,
     ) -> int:
         """Record a new open position. Returns position ID.
 
@@ -159,8 +173,8 @@ class ExitEngine:
              shares, risk_amount, trade_type,
              highest_price, lowest_price, status, opened_at,
              confidence, alignment, regime_at_entry, entry_quality,
-             regime_match, size_mult, atr_at_entry, reward_risk)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             regime_match, size_mult, atr_at_entry, reward_risk, max_hold_days)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             signal_uuid or "",
             ticker,
@@ -172,6 +186,7 @@ class ExitEngine:
             str(datetime.now()),
             float(confidence), alignment, regime, entry_quality,
             rm, float(size_mult), float(atr_at_entry), float(reward_risk),
+            int(max_hold_days or 0),
         ))
         pos_id = cur.lastrowid
         conn.commit()
@@ -219,10 +234,17 @@ class ExitEngine:
             else:
                 pnl_pct = (entry - exit_price) / entry
 
-            pnl_amount = round(pnl_pct * entry * shares, 2)
+            gross_pnl_amount = round(pnl_pct * entry * shares, 2)
+            # Cost realism (P0-2): deduct round-trip brokerage+STT+slippage so the
+            # paper book reflects what a real account would keep. pnl_amount/pnl_pct
+            # below are NET — all downstream win-rate / PF / R use net-of-cost.
+            from risk.costs import net_after_costs
+            notional             = entry * shares
+            pnl_amount, cost_amt = net_after_costs(gross_pnl_amount, notional)
+            pnl_pct              = pnl_amount / notional if notional else 0.0
 
             hold_days, hold_hours = self._hold_time(opened_at)
-            # R-multiple: realised P&L in units of the risk taken. The single
+            # R-multiple: realised NET P&L in units of the risk taken. The single
             # most important per-trade stat — expectancy is just mean(R).
             r_multiple = round(pnl_amount / risk_amount, 3) if risk_amount > 0 else None
             # MFE/MAE: best/worst the trade looked, in % from entry (direction-
@@ -235,15 +257,16 @@ class ExitEngine:
                 INSERT INTO closed_trades
                 (signal_uuid, ticker, signal, trade_type,
                  entry_price, exit_price, shares,
-                 pnl_amount, pnl_pct, exit_reason, close_date, status,
+                 pnl_amount, pnl_pct, gross_pnl_amount, cost_amount,
+                 exit_reason, close_date, status,
                  confidence, alignment, regime_at_entry, entry_quality,
                  regime_match, size_mult, atr_at_entry, reward_risk,
                  r_multiple, hold_hours, mfe_pct, mae_pct)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 signal_uuid, ticker, signal, trade_type,
                 entry, exit_price, shares,
-                pnl_amount, round(pnl_pct, 6),
+                pnl_amount, round(pnl_pct, 6), gross_pnl_amount, cost_amt,
                 reason, str(datetime.now()), "CLOSED",
                 pos.get("confidence"), pos.get("alignment"),
                 pos.get("regime_at_entry"), pos.get("entry_quality"),
@@ -271,11 +294,13 @@ class ExitEngine:
             "entry":       entry,
             "exit":        exit_price,
             "shares":      shares,
-            "pnl_amount":  pnl_amount,
-            "pnl_pct":     pnl_pct,
+            "pnl_amount":  pnl_amount,            # NET of costs
+            "pnl_pct":     pnl_pct,               # NET
+            "gross_pnl_amount": gross_pnl_amount,
+            "cost_amount":      cost_amt,
             "hold_days":   hold_days,
             "hold_hours":  round(hold_hours, 2),
-            "r_multiple":  r_multiple,
+            "r_multiple":  r_multiple,            # NET-based
             "mfe_pct":     mfe_pct,
             "mae_pct":     mae_pct,
             "reason":      reason,
@@ -452,11 +477,16 @@ class ExitEngine:
         except Exception:
             days_held = 0
 
-        max_hold = self.MAX_HOLD.get(trade_type, 7)
+        # Regime-aware hold limit (P1-1): use the max_hold_days persisted at
+        # entry (BULL 21 / BEAR 4 / HIGH_VOL 2). Fall back to the category
+        # default only when not recorded (legacy rows). A BEAR short must close
+        # in 4 days, not run 7 into the mean-reversion bounce.
+        pos_max_hold = int(pos.get("max_hold_days") or 0)
+        max_hold = pos_max_hold if pos_max_hold > 0 else self.MAX_HOLD.get(trade_type, 7)
         if days_held >= max_hold:
             return self._exit(pos_id, signal, price, pnl_pct,
                               "TIME_EXIT",
-                              f"Max hold {max_hold} days reached (held {days_held}d)")
+                              f"Max hold {max_hold}d reached (held {days_held}d, regime-aware)")
 
         # ── Check 5: Intraday must close by 15:15 ────────────────
         if trade_type == "intraday":
@@ -559,7 +589,12 @@ class ExitEngine:
             else:
                 pnl_pct = (entry - exit_price) / entry
 
-            pnl_amount = round(pnl_pct * entry * book_shares, 2)
+            gross_pnl_amount = round(pnl_pct * entry * book_shares, 2)
+            # Cost realism (P0-2) on the booked notional.
+            from risk.costs import net_after_costs
+            booked_notional      = entry * book_shares
+            pnl_amount, cost_amt = net_after_costs(gross_pnl_amount, booked_notional)
+            pnl_pct              = pnl_amount / booked_notional if booked_notional else 0.0
 
             # R-multiple on the booked slice — risk scales with the fraction booked.
             booked_risk = risk_amount * book_pct
@@ -571,15 +606,16 @@ class ExitEngine:
                 INSERT INTO closed_trades
                 (signal_uuid, ticker, signal, trade_type,
                  entry_price, exit_price, shares,
-                 pnl_amount, pnl_pct, exit_reason, close_date, status,
+                 pnl_amount, pnl_pct, gross_pnl_amount, cost_amount,
+                 exit_reason, close_date, status,
                  confidence, alignment, regime_at_entry, entry_quality,
                  regime_match, size_mult, atr_at_entry, reward_risk,
                  r_multiple, hold_hours, mfe_pct, mae_pct)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 signal_uuid, ticker, signal, trade_type,
                 entry, exit_price, book_shares,
-                pnl_amount, round(pnl_pct, 6),
+                pnl_amount, round(pnl_pct, 6), gross_pnl_amount, cost_amt,
                 f"{reason}_PARTIAL", str(datetime.now()), "CLOSED",
                 pos.get("confidence"), pos.get("alignment"),
                 pos.get("regime_at_entry"), pos.get("entry_quality"),
@@ -619,8 +655,10 @@ class ExitEngine:
             "exit":          exit_price,
             "booked_shares": book_shares,
             "remaining":     remain,
-            "pnl_amount":    pnl_amount,
-            "pnl_pct":       pnl_pct,
+            "pnl_amount":    pnl_amount,           # NET of costs
+            "pnl_pct":       pnl_pct,              # NET
+            "gross_pnl_amount": gross_pnl_amount,
+            "cost_amount":      cost_amt,
             "reason":        reason,
         }
 

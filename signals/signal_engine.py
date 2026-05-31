@@ -649,6 +649,10 @@ class SignalEngine:
                 "ticker":         self.ticker,
                 "current_price":  current_price,
                 "atr":            atr,
+                # Regime-aware holding horizon (P1-1) — persisted at open so the
+                # exit engine enforces the regime's max_hold_days (BULL 21 / BEAR
+                # 4 / HIGH_VOL 2) instead of a category-blind hardcoded default.
+                "max_hold_days":  int(g1_ctx.get("max_hold_days", 0) or 0),
             })
             reasons.append(
                 f"{cat.upper()} {direction} {conf_b:.0%} | "
@@ -844,8 +848,18 @@ class SignalEngine:
         if not price or price <= 0:
             logger.warning(f"[{self.ticker}] check_exits: invalid price {price}, skipping")
             return []
+        # Today's session open — for gap-fill exits on overnight positions (P1-3).
+        # Cached daily fetch (PERF-1) so this adds no network cost.
+        open_price = 0.0
+        try:
+            _df = self.feature_builder.price_fetcher.get_latest_daily(days=5)
+            if _df is not None and not _df.empty and "Open" in _df.columns:
+                open_price = float(_df["Open"].iloc[-1])
+        except Exception:
+            open_price = 0.0
         return self.exit_engine.check_all_positions(
             current_price=price,
+            open_price=open_price,
             ticker=self.ticker,
         )
 

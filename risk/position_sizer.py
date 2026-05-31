@@ -209,6 +209,85 @@ class PositionSizer:
             "ticker_exposure":  ticker_val,
         }
 
+    def check_correlation_risk(
+        self,
+        ticker:          str,
+        signal:          str,
+        proposed_value:  float,
+        capital:         float,
+        capital_mode:    str   = "FULL",
+        db_path:         str   = "database/trading.db",
+    ) -> Dict:
+        """
+        Concentration guard for the 5 correlated bank universe (audit P0-1).
+
+        The per-name/total caps in check_exposure() are direction-blind and
+        treat the banks as independent — but they are ~0.8 correlated to Bank
+        Nifty, so 5 LONG positions are one big macro bet, not five picks.
+        Two checks:
+          1. Same-direction cluster cap — at most `max_same_dir_cluster`
+             simultaneous positions in the SAME direction (mode-scaled).
+          2. Net-exposure cap — |Σ signed exposure| / capital ≤ MAX_NET_EXPOSURE.
+             A hedged pair (one long, one short) nets to ~0 and is fine; five
+             same-direction names blow past the net cap and are blocked.
+
+        Returns {"allowed": bool, "reason": str, "cluster": int, "net_pct": float}.
+        """
+        from risk.capital_mode import CapitalMode
+        cfg          = CapitalMode.MODES.get(capital_mode, CapitalMode.MODES["FULL"])
+        max_cluster  = int(cfg.get("max_same_dir_cluster", 3))
+        max_net      = CapitalMode.MAX_NET_EXPOSURE_PCT
+
+        try:
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT ticker, shares, entry_price, signal "
+                "FROM open_trades WHERE status='OPEN'"
+            ).fetchall()
+            conn.close()
+        except Exception:
+            rows = []
+
+        # Signed net exposure across the universe (LONG +, SHORT −), incl. proposal.
+        def _signed(sig, val):
+            return val if str(sig).upper() == "LONG" else -val
+        net_signed = sum(_signed(r[3], float(r[1] or 0) * float(r[2] or 0)) for r in rows)
+        new_net    = net_signed + _signed(signal, proposed_value)
+
+        # Same-direction cluster count (distinct tickers already in this direction,
+        # excluding this ticker so adding a second category on the same name isn't
+        # counted as a new correlated bet), + 1 for the proposed name if new.
+        same_dir_tickers = {
+            r[0] for r in rows
+            if str(r[3]).upper() == str(signal).upper() and r[0] != ticker
+        }
+        proposed_cluster = len(same_dir_tickers) + 1   # this ticker joins the cluster
+
+        if proposed_cluster > max_cluster:
+            return {
+                "allowed": False,
+                "reason":  (f"{signal} cluster cap: {proposed_cluster} correlated "
+                            f"banks same-direction > {max_cluster} ({capital_mode})"),
+                "cluster": proposed_cluster,
+                "net_pct": round(new_net / max(capital, 1), 3),
+            }
+
+        if abs(new_net) > max_net * capital:
+            return {
+                "allowed": False,
+                "reason":  (f"net-exposure cap: {abs(new_net)/max(capital,1):.0%} "
+                            f"net {'long' if new_net>0 else 'short'} > {max_net:.0%}"),
+                "cluster": proposed_cluster,
+                "net_pct": round(new_net / max(capital, 1), 3),
+            }
+
+        return {
+            "allowed": True,
+            "reason":  "within concentration limits",
+            "cluster": proposed_cluster,
+            "net_pct": round(new_net / max(capital, 1), 3),
+        }
+
     def _empty(self, signal: str, price: float) -> Dict:
         return {
             "signal": signal, "entry": price, "stop_loss": 0,

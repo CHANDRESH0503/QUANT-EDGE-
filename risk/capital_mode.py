@@ -29,10 +29,23 @@ class CapitalMode:
         "positional": {"stop_atr_mult": 2.5, "target_atr_mult": 6.5},
     }
 
+    # Universe-wide net-exposure cap (audit P0-1). The 5 banks are ~0.8
+    # correlated to Bank Nifty — they are one macro bet, not five picks. Net
+    # signed exposure (long − short, summed across the universe) may not exceed
+    # this fraction of capital, regardless of the per-name/total gross caps.
+    # 40% HDFC-long + 40% ICICI-long = 80% net long → blocked here even though
+    # gross is within the 80% total cap. A hedged pair (long one, short another)
+    # nets to ~0 and is allowed.
+    MAX_NET_EXPOSURE_PCT = 0.60
+
+    # `max_same_dir_cluster`: cap on simultaneous SAME-DIRECTION positions in the
+    # correlated universe. Prevents "all 5 banks LONG in one cycle" → a single
+    # Bank Nifty gap hitting every stop together. Mode-scaled.
     MODES = {
         "SMALL": {
             "max_risk_pct":     0.010,
             "max_positions":    2,
+            "max_same_dir_cluster": 1,
             "min_alignment":    {"A+"},
             "allowed_tf":       ["swing"],
             "min_conf":         0.68,
@@ -43,6 +56,7 @@ class CapitalMode:
         "GROWING": {
             "max_risk_pct":     0.015,
             "max_positions":    3,
+            "max_same_dir_cluster": 2,
             "min_alignment":    {"A+", "A"},
             "allowed_tf":       ["swing", "intraday"],
             "min_conf":         0.63,
@@ -53,6 +67,7 @@ class CapitalMode:
         "FULL": {
             "max_risk_pct":     0.020,
             "max_positions":    5,
+            "max_same_dir_cluster": 3,
             "min_alignment":    {"A+", "A", "B"},
             "allowed_tf":       ["swing", "intraday", "positional"],
             "min_conf":         0.60,

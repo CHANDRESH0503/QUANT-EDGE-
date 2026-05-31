@@ -102,6 +102,7 @@ class DatabaseSetup:
             ("open_trades",   "size_mult",       "REAL"),
             ("open_trades",   "atr_at_entry",    "REAL"),
             ("open_trades",   "reward_risk",     "REAL"),
+            ("open_trades",   "max_hold_days",   "INTEGER"),
             ("closed_trades", "confidence",      "REAL"),
             ("closed_trades", "alignment",       "TEXT"),
             ("closed_trades", "regime_at_entry", "TEXT"),
@@ -116,6 +117,10 @@ class DatabaseSetup:
             ("closed_trades", "hold_hours",      "REAL"),
             ("closed_trades", "mfe_pct",         "REAL"),
             ("closed_trades", "mae_pct",         "REAL"),
+            # Cost realism (P0-2): paper P&L is now net of brokerage+STT+slippage.
+            # pnl_amount/pnl_pct hold NET; gross + cost retained for transparency.
+            ("closed_trades", "gross_pnl_amount", "REAL"),
+            ("closed_trades", "cost_amount",      "REAL"),
             # signal_outcomes — rich attribution tags for calibration slicing.
             ("signal_outcomes", "category",      "TEXT"),
             ("signal_outcomes", "entry_quality", "TEXT"),

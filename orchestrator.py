@@ -90,6 +90,12 @@ GLOBAL_INTERVAL   = 3600   # 1-hr    global macro
 EXIT_INTERVAL     = 60     # 1-min   stop/target exit monitor
 TICK_SLEEP        = 30     # main loop resolution (s)
 REVERSAL_COOLDOWN_SEC = 1800  # 30-min throttle on per-(ticker, cat, type) reversal alerts
+# P1-2: auto-close positions when the REGIME turns confirmed-adverse (LONG in a
+# confirmed BEAR, SHORT in a confirmed BULL). Regime is stable, so this is a
+# real exit signal, not noise. MODEL_REVERSAL stays ADVISORY-only — the swing/
+# positional models are weak (~0.46 CV) and flip on noise; auto-exiting on them
+# would whipsaw. Set False to revert to fully-advisory behaviour.
+AUTO_EXIT_ON_REGIME_FLIP = True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -618,6 +624,22 @@ class MultiBankOrchestrator:
                 )
                 continue
 
+            # Guard 5 — concentration/correlation cap (P0-1). The 5 banks are
+            # one correlated macro bet; prevent loading them all same-direction.
+            corr = sizer.check_correlation_risk(
+                ticker        = ticker,
+                signal        = sig["signal"],
+                proposed_value= proposed_value,
+                capital       = self.capital,
+                capital_mode  = cap_mode,
+                db_path       = self.db_path,
+            )
+            if not corr.get("allowed", True):
+                logger.info(
+                    f"[{ticker}] skipped {cat}: concentration block — {corr.get('reason','?')}"
+                )
+                continue
+
             try:
                 self.exit_engine.open_position(
                     signal       = sig["signal"],
@@ -637,6 +659,7 @@ class MultiBankOrchestrator:
                     size_mult    = float(sig.get("size_mult",   1.0)),
                     atr_at_entry = float(sig.get("atr",         0.0)),
                     reward_risk  = float(sig.get("reward_risk", 0.0)),
+                    max_hold_days= int(sig.get("max_hold_days", 0)),
                 )
                 logger.info(
                     f"[{ticker}] opened paper trade: {cat} {sig['signal']} "
@@ -799,6 +822,30 @@ class MultiBankOrchestrator:
                 )
             except Exception as e:
                 logger.warning(f"[{ticker}] reversal telegram: {e}")
+
+            # P1-2: auto-close on CONFIRMED regime flip (not on noisy model flips).
+            if AUTO_EXIT_ON_REGIME_FLIP and rtype == "REGIME_CHANGE":
+                pos_id = rev.get("position_id")
+                price  = float(signal.get("current_price", 0)) or float(rev.get("entry_price", 0))
+                if pos_id and price > 0:
+                    try:
+                        closed = self.exit_engine.close_position(
+                            pos_id, price, "REGIME_FLIP_EXIT"
+                        )
+                        if closed:
+                            logger.warning(
+                                f"[{ticker}] AUTO-EXIT {cat} {rev.get('open_signal')} "
+                                f"on regime flip → {rev.get('regime')} "
+                                f"| net pnl={closed.get('pnl_pct',0):+.2%}"
+                            )
+                            self._safe_telegram(
+                                f"🔄 [{ticker}] {cat} auto-closed — regime turned "
+                                f"{rev.get('regime')} against the position "
+                                f"(net {closed.get('pnl_pct',0):+.2%})",
+                                f"regime_exit_{ticker}_{cat}",
+                            )
+                    except Exception as e:
+                        logger.warning(f"[{ticker}] regime-flip auto-exit failed: {e}")
 
     def _run_exit_checks(self) -> None:
         """
