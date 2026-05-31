@@ -66,6 +66,12 @@ DD multipliers (mode-aware, shared with `CircuitBreaker.THRESHOLDS`): SMALL halt
 
 ---
 
+## Latest Audit Fixes (2026-05-31)
+
+**VPS-1 — News pipeline dead on VPS (gzip never decompressed).** `_fetch_feed_bytes` in `data/news_fetcher.py` advertised `Accept-Encoding: gzip, deflate` but passed the raw compressed response straight to `feedparser.parse()`, which cannot parse compressed bytes and silently returned **0 entries** for every feed. Locally this was masked because Google News replied uncompressed; on the VPS (`QE_IS_VPS=1` disables Google News) it meant *zero* news ingested. Fixed: decompress based on the `Content-Encoding` response header (gzip / deflate, with raw-deflate fallback) before parsing. Verified: Moneycontrol/LiveMint/CNBC now yield 4/35/200 entries; full `fetch_all_banks` cycle inserted real articles.
+
+**VPS-2 — Stale-model deployment gap (root cause of "BEAR_TRENDING → LONG").** `models/saved/*.pkl` is gitignored, so `git pull` on the VPS ships new code against the *old* pre-CR-1A models that learned mean-reversion (LONG in BEAR, SHORT in BULL). The live inference path was verified direction-correct (forward-return labels, shared `classify_regime_row` one-hot, Gate 4 argmax→{0:SHORT,1:FLAT,2:LONG}) — the bug was purely that the corrected 2026-05-27 models never reached the VPS. Fix: (a) new `deploy_models.sh` rsyncs models to the VPS; (b) `orchestrator._audit_models()` runs at boot and alerts (log CRITICAL + Telegram) if any bank's directional models are missing or predate the CR-1A fix epoch. Documented in the deploy section.
+
 ## Latest Audit Fixes (2026-05-27)
 
 **CR-1A — Regime/label horizon mismatch (RETRAIN-REQUIRED).** `classify_regime_row` no longer reads `returns_20d`. Regime is now purely ADX + EMA spread. Previously, BEAR was labeled from past-20d-down while ML labels used forward-5d returns — the model learned mean-reversion and surfaced LONGs in BEAR and SHORTs in BULL. Vectorised training path aligned. All 5 banks retrained 2026-05-27.
@@ -299,6 +305,21 @@ git pull && systemctl restart quantedge-signal quantedge-api
 git pull && systemctl restart quantedge-signal quantedge-api
 journalctl -u quantedge-signal -n 50    # confirm clean boot
 ```
+
+### Deploying models (after a retrain) — CRITICAL
+`models/saved/*.pkl` is **gitignored**, so `git pull` does NOT update the
+directional ML models — the VPS keeps whatever .pkl files are already on disk.
+After any retrain you MUST sync the models separately, **from the training
+machine** (not the VPS):
+```bash
+./deploy_models.sh                 # rsync models → VPS, then restart signal svc
+./deploy_models.sh --no-restart    # sync only
+```
+Skipping this is what caused the "BEAR_TRENDING giving LONG" bug: new code ran
+against the *old pre-CR-1A models* that learned mean-reversion. The orchestrator
+now runs `_audit_models()` at boot and alerts (log CRITICAL + Telegram) if any
+bank's directional models are missing or predate the 2026-05-27 CR-1A fix —
+watch for `Model audit ✓` in the boot log.
 
 ### Health checks
 ```bash

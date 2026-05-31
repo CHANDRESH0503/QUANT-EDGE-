@@ -8,6 +8,8 @@ import sqlite3
 import logging
 import os
 import re
+import gzip
+import zlib
 import urllib.request
 import urllib.error
 
@@ -64,8 +66,30 @@ def _fetch_feed_bytes(url: str) -> Optional[bytes]:
         with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as resp:
             status = getattr(resp, "status", "?")
             data   = resp.read()
+            # We advertise `Accept-Encoding: gzip, deflate`, so most feeds
+            # (ET, Moneycontrol, CNBC, LiveMint) reply compressed. urllib does
+            # NOT auto-decompress, and feedparser cannot parse compressed bytes
+            # — it silently returns 0 entries. Decompress here based on the
+            # Content-Encoding header. This is THE reason news died on the VPS:
+            # once Google News (the one feed that replied uncompressed) is
+            # disabled with QE_IS_VPS=1, every remaining feed parsed to 0.
+            encoding = (resp.headers.get("Content-Encoding") or "").lower()
+            if encoding == "gzip":
+                try:
+                    data = gzip.decompress(data)
+                except OSError:
+                    pass  # not actually gzipped — use bytes as-is
+            elif encoding == "deflate":
+                try:
+                    data = zlib.decompress(data)
+                except zlib.error:
+                    try:
+                        data = zlib.decompress(data, -zlib.MAX_WBITS)  # raw deflate
+                    except zlib.error:
+                        pass
             logger.debug(
-                f"_fetch_feed_bytes: status={status} bytes={len(data)} url={url[:80]}"
+                f"_fetch_feed_bytes: status={status} bytes={len(data)} "
+                f"enc={encoding or 'none'} url={url[:80]}"
             )
             return data
     except urllib.error.HTTPError as e:

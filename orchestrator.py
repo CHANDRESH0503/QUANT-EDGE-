@@ -267,6 +267,7 @@ class MultiBankOrchestrator:
 
         self._ensure_schema()
         self._load_models()
+        self._audit_models()
 
         # Warm FinBERT now — first cycle pays zero model-load cost
         try:
@@ -341,6 +342,61 @@ class MultiBankOrchestrator:
                 logger.info(f"[{t}] models loaded ✓")
             except Exception as e:
                 logger.warning(f"[{t}] model load: {e}")
+
+    # Directional models retrained 2026-05-27 with the CR-1A regime fix.
+    # Anything older predicts LONG-in-BEAR / SHORT-in-BULL (mean-reversion bug).
+    _REGIME_FIX_EPOCH = 1748284800  # 2026-05-27 00:00 UTC
+
+    def _audit_models(self) -> None:
+        """Boot-time guard against the silent stale/missing-model deployment gap.
+
+        models/saved/*.pkl is gitignored, so `git pull` on the VPS does NOT
+        update the directional models — it ships new code against whatever .pkl
+        files already sit on disk. Two failure modes this catches and surfaces
+        (log CRITICAL + Telegram) instead of letting them corrupt every signal:
+
+          1. Directional models MISSING  → Gate 4 returns FLAT for everything
+             (or, worse, a degenerate fallback). Trading is effectively dead.
+          2. Directional models STALE (pre-CR-1A) → the model surfaces LONG in
+             BEAR and SHORT in BULL. This is exactly the "BEAR_TRENDING giving
+             LONG" symptom. Fix: ./deploy_models.sh from the training machine.
+        """
+        import glob
+        saved_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "models", "saved")
+        problems: list[str] = []
+        for t in self.tickers:
+            safe = t.replace(".NS", "")
+            # Directional models only — exclude the per-ticker regime HMM.
+            files = [f for f in glob.glob(os.path.join(saved_dir, f"{safe}_*.pkl"))
+                     if "regime_model" not in os.path.basename(f)]
+            if not files:
+                problems.append(f"{safe}: NO directional models on disk")
+                continue
+            newest = max(os.path.getmtime(f) for f in files)
+            if newest < self._REGIME_FIX_EPOCH:
+                age_days = (time.time() - newest) / 86400
+                problems.append(
+                    f"{safe}: models predate CR-1A regime fix "
+                    f"({age_days:.0f}d old) — BEAR→LONG risk"
+                )
+
+        if not problems:
+            logger.info("Model audit ✓ — all banks have post-CR-1A directional models")
+            return
+
+        banner = (
+            "🚨 MODEL AUDIT FAILED — deployed models are missing or stale.\n"
+            + "\n".join(f"  • {p}" for p in problems)
+            + "\n→ Run ./deploy_models.sh from the training machine, then restart."
+        )
+        for line in banner.split("\n"):
+            logger.critical(line)
+        try:
+            if APIConfig.TELEGRAM_TOKEN:
+                self.telegram.send_raw(banner)
+        except Exception:
+            pass
 
     def _ensure_schema(self) -> None:
         """Idempotent DB schema setup — safe to run on every boot."""
