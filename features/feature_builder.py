@@ -1090,15 +1090,44 @@ class FeatureBuilder:
         except (TypeError, ValueError):
             return 0.0
 
+    # Features where 0.0 is a VALID signal, not "missing data". These are
+    # binary flags, one-hot regime states, and healthy-state risk fields
+    # (no drawdown / no losing streak = 0). Counting them as "missing" wrongly
+    # inflated miss% by ~30 features — enough to push an otherwise-healthy build
+    # past the 50% POOR cliff and hard-FLAT every bank. Excluded from the
+    # missing-data denominator. Genuinely-continuous features (price/technical,
+    # options, sentiment, flow magnitudes) are still counted, so a real data
+    # source outage still correctly degrades quality.
+    _DQ_FLAG_PREFIXES = ("is_", "chart_", "regime_")
+    _DQ_FLAG_SUFFIXES = ("_flag",)
+    _DQ_FLAG_NAMES = frozenset({
+        "price_above_vwap", "absorption_flag", "block_is_buying",
+        "promoter_change", "pre_earnings_drift", "consecutive_loss_halt",
+        "earnings_risk_flag", "macro_stale", "near_breakout",
+        "trade_long", "trade_short",
+    })
+
+    @classmethod
+    def _is_dq_flag(cls, name: str) -> bool:
+        """True if `name` is a flag/one-hot/healthy-zero feature (0 is valid)."""
+        return (
+            name in cls._DQ_FLAG_NAMES
+            or name.startswith(cls._DQ_FLAG_PREFIXES)
+            or name.endswith(cls._DQ_FLAG_SUFFIXES)
+        )
+
     def _data_quality(self, raw: Dict) -> Dict:
         """
-        Assess what fraction of numeric features are non-zero.
-        Detects data source failures early.
+        Assess what fraction of CONTINUOUS numeric features are non-zero.
+        Detects data source failures early. Flag/one-hot/healthy-zero features
+        are excluded (see `_is_dq_flag`) — a flag being 0 is information, not a
+        missing data source.
         Honors `macro_stale=1` by floor-clamping quality to DEGRADED so
         H1's +5pp Gate 6 boost engages when global_snapshots is stale.
         """
         numeric = {k: v for k, v in raw.items()
-                   if isinstance(v, (int, float, np.floating, np.integer))}
+                   if isinstance(v, (int, float, np.floating, np.integer))
+                   and not self._is_dq_flag(k)}
         total   = len(numeric)
         zeros   = sum(1 for v in numeric.values() if v == 0.0)
         miss    = zeros / max(total, 1)

@@ -6,6 +6,8 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import threading
+import time as _time
 from datetime import datetime, timedelta
 import logging
 
@@ -13,19 +15,32 @@ logger = logging.getLogger(__name__)
 
 _DROP_COLS = {"Dividends", "Stock Splits", "Capital Gains"}
 
+# ── Shared price cache (TTL + last-good fallback) ─────────────────────────────
+# WHY: build_all() re-downloads ~300 daily bars per bank EVERY cycle (every
+# 5 min, even on intraday-only cycles). Daily/weekly bars are immutable intraday
+# — re-fetching them is pure waste AND the system's main failure mode: when
+# yfinance rate-limits the 5-banks-in-a-row burst it returns an EMPTY frame,
+# which makes build_all() abort to _empty_result() → price=0/ATR=0 → the bank
+# FLATs the whole cycle. Caching kills the redundant downloads; the last-good
+# fallback means a transient rate-limit serves slightly-stale data instead of
+# cascading every bank to FLAT.
+#
+# TTL is per-interval: daily/weekly change once a day so a 15-min TTL is plenty;
+# 5-min intraday needs freshness so it gets a short TTL (just long enough to
+# dedupe within a single cycle's burst).
+_CACHE_LOCK = threading.Lock()
+_PRICE_CACHE: dict = {}   # key -> {"ts": float, "df": DataFrame}
 
-def yf_safe_download(
-    ticker: str,
-    period: str = "30d",
-    interval: str = "1d",
-    start: str = None,
-    end: str = None,
-) -> pd.DataFrame:
-    """
-    Reliable replacement for yf.download() using Ticker.history().
-    Uses Ticker.history() which is the v1.x preferred API with its own
-    session/cookie handling.
-    """
+_TTL_BY_INTERVAL = {
+    "1d":  900,    # 15 min — daily bar is fixed intraday
+    "1wk": 21600,  # 6 h
+    "5m":  120,    # 2 min — keep intraday fresh, dedupe same-cycle re-hits
+}
+_DEFAULT_TTL = 300
+
+
+def _raw_yf_download(ticker, period, interval, start, end) -> pd.DataFrame:
+    """Uncached yfinance call via Ticker.history()."""
     try:
         t = yf.Ticker(ticker)
         kw: dict = dict(interval=interval, auto_adjust=True, prepost=False)
@@ -45,6 +60,52 @@ def yf_safe_download(
     except Exception as e:
         logger.debug(f"yf_safe_download({ticker}): {e}")
         return pd.DataFrame()
+
+
+def yf_safe_download(
+    ticker: str,
+    period: str = "30d",
+    interval: str = "1d",
+    start: str = None,
+    end: str = None,
+) -> pd.DataFrame:
+    """
+    Reliable replacement for yf.download() using Ticker.history(), with a shared
+    TTL cache and last-good fallback (see module note above).
+
+    - Within TTL: returns the cached frame, no network call.
+    - On a fresh fetch returning empty (rate-limited / transient): falls back to
+      the last good frame for this key if one exists, so callers don't cascade
+      to FLAT. Only returns empty when we've never fetched this key successfully.
+    """
+    key = (ticker, interval, start or period, end)
+    ttl = _TTL_BY_INTERVAL.get(interval, _DEFAULT_TTL)
+    now = _time.time()
+
+    with _CACHE_LOCK:
+        hit = _PRICE_CACHE.get(key)
+        if hit and (now - hit["ts"]) < ttl:
+            return hit["df"].copy()
+
+    df = _raw_yf_download(ticker, period, interval, start, end)
+
+    if not df.empty:
+        with _CACHE_LOCK:
+            _PRICE_CACHE[key] = {"ts": now, "df": df}
+        return df.copy()
+
+    # Fresh fetch failed — serve last-good (any age) rather than cascade to FLAT.
+    with _CACHE_LOCK:
+        hit = _PRICE_CACHE.get(key)
+    if hit is not None:
+        age_min = (now - hit["ts"]) / 60
+        logger.warning(
+            f"yf fetch empty for {ticker} [{interval}] — serving last-good "
+            f"({len(hit['df'])} rows, {age_min:.0f} min old) to avoid FLAT-cascade"
+        )
+        return hit["df"].copy()
+
+    return df
 
 
 class PriceFetcher:
