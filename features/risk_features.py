@@ -146,13 +146,25 @@ class RiskFeatures:
         meta_mult    = float(meta_features.get("meta_size_mult", 1.0))
 
         # ── Final composite size multiplier ───────────────────────
-        # All multipliers compound: weakest gate dominates
+        # OWNERSHIP RULE (SIZE-1, 2026-05-31): each risk factor is applied
+        # EXACTLY ONCE, by its owning component. This composite owns ONLY the
+        # portfolio-state factors: heat, drawdown, anomaly, loss-streak, meta.
+        #
+        #   • S/R entry quality  → owned by Gate 5 (GRADE_SIZE_MAP + near_breakout),
+        #     applied as g5_ctx.size_mult in signal_engine. Folding sr_mult in
+        #     here too double-counted it: Grade D became 0.40×0.45=0.18× (not
+        #     0.40×) → 0–1 shares → signal discarded after passing all 6 gates.
+        #   • Capital mode       → owned by position_sizer via max_risk_pct
+        #     (1%/1.5%/2%). Folding cap_mult (0.5/0.75/1.0) in here too
+        #     double-penalised SMALL/GROWING accounts (e.g. SMALL risked 0.5%,
+        #     not the intended 1%).
+        #
+        # sr_mult and cap_mult are still RETURNED below for dashboard/transparency
+        # but are deliberately NOT in this product. Do not re-add them.
         final_mult   = (
-            cap_mult *
             heat_mult *
             dd_mult *
             anomaly_mult *
-            sr_mult *
             loss_mult *
             meta_mult
         )

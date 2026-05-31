@@ -110,10 +110,21 @@ class Gate6Confidence:
         # ── Confidence threshold (VIX- and data-quality-adaptive) ─
         threshold = self.THRESHOLDS.get(model_type, {}).get(capital_mode, 0.60)
         india_vix = float(risk_context.get("india_vix", 0.0))
+        # VIX penalty is CATEGORY-AWARE (G6-1). 20yr rule: elevated VIX is the
+        # SOURCE of alpha for intraday — the market moves 2–3%/session, exactly
+        # the regime where same-session edges pay. Penalising intraday like
+        # positional blocks valid trades in the best environment. A 4-week
+        # positional hold THROUGH that volatility is the real risk → penalise it
+        # most. (vix>25 boost, vix>20 boost) per category:
+        _vix_boost = {
+            "intraday":   (0.03, 0.00),
+            "swing":      (0.10, 0.05),
+            "positional": (0.15, 0.08),
+        }.get(model_type, (0.10, 0.05))
         if india_vix > 25:
-            threshold = min(0.90, threshold + 0.10)
+            threshold = min(0.90, threshold + _vix_boost[0])
         elif india_vix > 20:
-            threshold = min(0.90, threshold + 0.05)
+            threshold = min(0.90, threshold + _vix_boost[1])
         # Data-quality boost — DEGRADED feature vectors need stronger conviction.
         if data_quality_boost > 0:
             threshold = min(0.95, threshold + data_quality_boost)

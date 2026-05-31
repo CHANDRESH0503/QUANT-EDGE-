@@ -794,6 +794,12 @@ class FeatureBuilder:
                 "anomaly_action":        anomaly_raw.get("recommended_action", "NORMAL"),
                 # Gate 6 VIX threshold adjustment — MUST be raw level (not normalised)
                 "india_vix":             float(macro_raw.get("india_vix_level", 15.0)),
+                # Circuit-breaker level/reason — Gate 6 reads these directly for
+                # its CB hard-block + reason message. Previously omitted here, so
+                # gate6's `risk_context.get("circuit_breaker_level","OK")` was
+                # always "OK" (dead code) and CB-halt reasons logged empty (G6-2).
+                "circuit_breaker_level":  risk_feats.get("circuit_breaker_level", "OK"),
+                "circuit_breaker_reason": risk_feats.get("circuit_breaker_reason", ""),
             },
 
             # Regime context — gate 1 in signal_engine.
