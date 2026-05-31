@@ -1787,63 +1787,17 @@
     <div class="card">
       <div class="card-label">
         PSYCHOLOGY TRACKER
-        <span class="badge badge-green">GOOD</span>
+        <span class="badge badge-green" id="psychGrade">—</span>
       </div>
 
-      <div class="psych-meter">
-        <div class="psych-item">
-          <div class="psych-header">
-            <span>DISCIPLINE SCORE</span>
-            <span style="color:var(--green);font-weight:700">82%</span>
-          </div>
-          <div class="psych-bar"><div class="psych-fill" style="width:82%;background:var(--green)"></div></div>
-        </div>
-        <div class="psych-item">
-          <div class="psych-header">
-            <span>SIGNAL ADHERENCE</span>
-            <span style="color:var(--green);font-weight:700">91%</span>
-          </div>
-          <div class="psych-bar"><div class="psych-fill" style="width:91%;background:var(--green)"></div></div>
-        </div>
-        <div class="psych-item">
-          <div class="psych-header">
-            <span>EARLY EXIT BIAS</span>
-            <span style="color:var(--amber);font-weight:700">LOW</span>
-          </div>
-          <div class="psych-bar"><div class="psych-fill" style="width:25%;background:var(--amber)"></div></div>
-        </div>
-        <div class="psych-item">
-          <div class="psych-header">
-            <span>OVERTRADING RISK</span>
-            <span style="color:var(--green);font-weight:700">LOW</span>
-          </div>
-          <div class="psych-bar"><div class="psych-fill" style="width:15%;background:var(--green)"></div></div>
-        </div>
-        <div class="psych-item">
-          <div class="psych-header">
-            <span>LOSS AVERSION</span>
-            <span style="color:var(--green);font-weight:700">NORMAL</span>
-          </div>
-          <div class="psych-bar"><div class="psych-fill" style="width:30%;background:var(--green)"></div></div>
-        </div>
+      <div class="psych-meter" id="psychMeter">
+        <div style="color:var(--text3);font-size:9px;padding:6px 0">Loading…</div>
       </div>
 
       <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px;">
         <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">SYSTEM ALERTS</div>
-        <div class="alert-item">
-          <div class="alert-icon" style="background:var(--amber)"></div>
-          <div class="alert-text">Earnings in 18 days — reduce position size by 50% after Day 12</div>
-          <div class="alert-time">NOW</div>
-        </div>
-        <div class="alert-item">
-          <div class="alert-icon" style="background:var(--green)"></div>
-          <div class="alert-text">Model retrained Sunday — accuracy improved to 62%</div>
-          <div class="alert-time">2D AGO</div>
-        </div>
-        <div class="alert-item">
-          <div class="alert-icon" style="background:var(--blue)"></div>
-          <div class="alert-text">BSE filing detected — HDFC debt raising plan approved. LLM classified: BULLISH</div>
-          <div class="alert-time">24M AGO</div>
+        <div id="systemAlerts">
+          <div style="color:var(--text3);font-size:9px;padding:6px 0">No active alerts.</div>
         </div>
       </div>
     </div>
@@ -1859,26 +1813,25 @@
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
         <div>
           <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">SEARCH INTEREST TREND</div>
-          <div class="fii-row"><span style="color:var(--text3)">HDFC Home Loan</span><span style="color:var(--green);font-weight:700">+18% ▲</span></div>
-          <div class="fii-row"><span style="color:var(--text3)">HDFC Credit Card</span><span style="color:var(--green);font-weight:700">+12% ▲</span></div>
-          <div class="fii-row"><span style="color:var(--text3)">HDFC Bank Account</span><span style="color:var(--amber);font-weight:700">+4% →</span></div>
-          <div class="fii-row"><span style="color:var(--text3)">HDFC Personal Loan</span><span style="color:var(--green);font-weight:700">+22% ▲</span></div>
-          <div style="margin-top:8px;padding:6px;background:var(--green-dim);border:1px solid var(--green)33;text-align:center">
+          <div id="altTrendRows">
+            <div style="color:var(--text3);font-size:9px;padding:6px 0">Loading…</div>
+          </div>
+          <div id="altDemandSignal" style="margin-top:8px;padding:6px;background:var(--bg3);border:1px solid var(--border);text-align:center">
             <div style="font-size:8px;color:var(--text3)">DEMAND SIGNAL</div>
-            <div style="font-size:12px;font-weight:700;color:var(--green)">GROWING ▲</div>
+            <div style="font-size:12px;font-weight:700;color:var(--text3)">—</div>
           </div>
         </div>
         <div>
           <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:6px">HIRING ACTIVITY</div>
-          <div style="padding:10px;border:1px solid var(--border);background:var(--bg3);text-align:center;margin-bottom:8px">
+          <div id="altHiring" style="padding:10px;border:1px solid var(--border);background:var(--bg3);text-align:center;margin-bottom:8px">
             <div style="font-size:8px;color:var(--text3)">JOB POSTINGS TREND</div>
-            <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:18px;color:var(--green);margin-top:4px">EXPANSION</div>
-            <div style="font-size:9px;color:var(--text3);margin-top:2px">+24% vs 4 weeks ago</div>
+            <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:18px;color:var(--text3);margin-top:4px">—</div>
+            <div style="font-size:9px;color:var(--text3);margin-top:2px">no data</div>
           </div>
           <div style="font-size:8px;color:var(--text3);letter-spacing:0.1em;margin-bottom:4px">INSIDER ACTIVITY</div>
-          <div class="fii-row"><span style="color:var(--text3)">Promoter Holding</span><span style="font-weight:700">25.8%</span></div>
-          <div class="fii-row"><span style="color:var(--text3)">QoQ Change</span><span style="color:var(--green);font-weight:700">+0.0%</span></div>
-          <div class="fii-row"><span style="color:var(--text3)">Bulk Deals</span><span style="color:var(--green);font-weight:700">NET BUY</span></div>
+          <div id="altInsider">
+            <div style="color:var(--text3);font-size:9px;padding:6px 0">No insider data yet.</div>
+          </div>
         </div>
       </div>
     </div>
@@ -3559,6 +3512,120 @@ function updateCapitalBadge(d) {
   el.style.color = modeColors[mode] || 'var(--green)';
 }
 
+// HTML-escape for any DB-sourced text injected via innerHTML.
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// ── PSYCHOLOGY (real — from PsychologyTracker; honest empty state) ──
+function updatePsychology(d) {
+  const p = d.psychology || {};
+  const grade = document.getElementById('psychGrade');
+  const meter = document.getElementById('psychMeter');
+  if (!meter) return;
+
+  if (p.status !== 'OK') {
+    if (grade) { grade.textContent = 'PENDING'; grade.className = 'badge'; }
+    const have = p.trades_analysed || 0, need = p.needed || 10;
+    meter.innerHTML = `<div style="color:var(--text3);font-size:9px;padding:8px 0;line-height:1.6">`
+      + `Insufficient data — psychology analysis needs <b style="color:var(--text2)">${need}+</b> closed trades.<br>`
+      + `Have <b style="color:var(--text2)">${have}</b> / ${need}. Builds as paper trades close.</div>`;
+    return;
+  }
+
+  const gradeCls = {A:'badge-green',B:'badge-green',C:'badge-amber',D:'badge-red'}[p.grade] || 'badge';
+  if (grade) { grade.textContent = 'GRADE ' + (p.grade || '—'); grade.className = 'badge ' + gradeCls; }
+
+  const disc = Math.max(0, Math.min(100, p.discipline_score || 0));
+  const dColor = disc >= 70 ? 'var(--green)' : disc >= 40 ? 'var(--amber)' : 'var(--red)';
+  let html = `<div class="psych-item"><div class="psych-header">`
+    + `<span>DISCIPLINE SCORE</span><span style="color:${dColor};font-weight:700">${disc}%</span></div>`
+    + `<div class="psych-bar"><div class="psych-fill" style="width:${disc}%;background:${dColor}"></div></div></div>`;
+
+  const biasRow = (label, b) => {
+    const det = b && b.detected;
+    const color = det ? 'var(--red)' : 'var(--green)';
+    const status = det ? 'FLAGGED' : 'OK';
+    const val = (b && b.value) ? ` · ${esc(b.value)}` : '';
+    return `<div class="psych-item"><div class="psych-header">`
+      + `<span>${label}</span><span style="color:${color};font-weight:700">${status}</span></div>`
+      + `<div class="psych-bar"><div class="psych-fill" style="width:${det?80:20}%;background:${color}"></div></div>`
+      + (val ? `<div style="font-size:8px;color:var(--text3);margin-top:2px">${val.slice(3)}</div>` : '')
+      + `</div>`;
+  };
+  html += biasRow('LOSS AVERSION',     p.loss_aversion);
+  html += biasRow('OVERTRADING',       p.overtrading);
+  html += biasRow('EARLY EXIT',        p.early_exit);
+  html += biasRow('REVENGE TRADING',   p.revenge_trading);
+  html += biasRow('SIZING CONSISTENCY',p.inconsistent_sizing);
+  meter.innerHTML = html;
+}
+
+// ── ALTERNATIVE DATA · GOOGLE TRENDS (real — from alt_trends table) ──
+function updateAltData(d) {
+  const rows = d.alt_data || [];
+  const container = document.getElementById('altTrendRows');
+  const demandEl  = document.getElementById('altDemandSignal');
+  if (!container) return;
+
+  const setDemand = (label, color) => {
+    if (!demandEl) return;
+    const inner = demandEl.querySelector('div:last-child');
+    if (inner) { inner.textContent = label; inner.style.color = color; }
+  };
+
+  if (!rows.length) {
+    container.innerHTML = `<div style="color:var(--text3);font-size:9px;padding:6px 0">No Google Trends data yet.</div>`;
+    setDemand('—', 'var(--text3)');
+    return;
+  }
+
+  container.innerHTML = rows.slice(0, 5).map(r => {
+    const slope = r.slope || 0;
+    const up = slope > 0.02, down = slope < -0.02;
+    const color = up ? 'var(--green)' : down ? 'var(--red)' : 'var(--amber)';
+    const arrow = up ? '▲' : down ? '▼' : '→';
+    const pct = (slope >= 0 ? '+' : '') + (slope * 100).toFixed(0) + '%';
+    return `<div class="fii-row"><span style="color:var(--text3)">${esc(r.keyword)}</span>`
+      + `<span style="color:${color};font-weight:700">${pct} ${arrow}</span></div>`;
+  }).join('');
+
+  const avg = rows.reduce((a, r) => a + (r.slope || 0), 0) / rows.length;
+  if (avg > 0.02)      setDemand('GROWING ▲',  'var(--green)');
+  else if (avg < -0.02) setDemand('DECLINING ▼','var(--red)');
+  else                  setDemand('STABLE →',   'var(--amber)');
+}
+
+// ── SYSTEM ALERTS (real — derived from live state + important news) ──
+function updateSystemAlerts(d) {
+  const el = document.getElementById('systemAlerts');
+  if (!el) return;
+  const alerts = [];
+
+  if (d.is_paper_trading)
+    alerts.push(['var(--blue)', `Paper trading · ${d.capital_mode || ''} mode — collecting outcome data`, 'LIVE']);
+
+  const rb = (d.performance || {}).risk_badge;
+  if (rb && !['OK','NORMAL','GOOD',''].includes(rb))
+    alerts.push(['var(--amber)', `Risk status: ${esc(rb)}`, 'NOW']);
+
+  (d.news || []).filter(n => /bse/i.test(n.source || '')).slice(0, 2).forEach(n =>
+    alerts.push(['var(--blue)', n.title, relTime(n.time)]));
+
+  (d.news || []).filter(n => Math.abs(n.score || 0) > 0.5).slice(0, 2).forEach(n =>
+    alerts.push([(n.score > 0 ? 'var(--green)' : 'var(--red)'), n.title, relTime(n.time)]));
+
+  if (!alerts.length) {
+    el.innerHTML = `<div style="color:var(--text3);font-size:9px;padding:6px 0">No active alerts.</div>`;
+    return;
+  }
+  el.innerHTML = alerts.slice(0, 4).map(([c, t, tm]) =>
+    `<div class="alert-item"><div class="alert-icon" style="background:${c}"></div>`
+    + `<div class="alert-text">${esc(t)}</div><div class="alert-time">${esc(tm)}</div></div>`).join('');
+}
+
 function updateDashboard(d) {
   liveData = d;
   if (d.ist) setEl('clockDate', `IST · ${d.ist}`);
@@ -3585,6 +3652,9 @@ function updateDashboard(d) {
   _safe(updateFeatureImportance, d);
   _safe(updateSupportResistance, d);
   _safe(updateOrderFlow, d);
+  _safe(updatePsychology, d);
+  _safe(updateAltData, d);
+  _safe(updateSystemAlerts, d);
 
   // Chart always runs — requestAnimationFrame ensures layout is ready before reading offsetWidth
   if (currentPeriod === '1d' || currentPeriod === '1w') {

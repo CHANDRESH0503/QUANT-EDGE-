@@ -851,9 +851,37 @@ async def live_data(
         ORDER  BY fetched_at DESC
     """, (str(now - timedelta(days=8)),))
 
-    # ── 18. Psychology ─────────────────────────────────────────
-    psych = {"discipline": 80, "adherence": 88,
-             "early_exit": 20, "overtrading": 15, "loss_aversion": 30}
+    # ── 18. Psychology (real — computed from closed trades) ─────
+    # Was a hardcoded {discipline:80, adherence:88, …} placeholder. Now driven
+    # by PsychologyTracker so the dashboard shows the truth: with <10 closed
+    # trades it honestly reports INSUFFICIENT_DATA instead of faking discipline.
+    try:
+        from dashboard.psychology_tracker import PsychologyTracker
+        _pa = PsychologyTracker(DB_PATH).analyse()
+        if _pa.get("status") == "INSUFFICIENT_DATA":
+            psych = {"status": "INSUFFICIENT_DATA",
+                     "trades_analysed": int(_pa.get("trades_analysed", 0)),
+                     "needed": 10}
+        else:
+            _biases = _pa.get("biases", {})
+            def _bias(name: str) -> Dict:
+                b = _biases.get(name, {})
+                return {"detected": bool(b.get("detected")),
+                        "value": str(b.get("value_str", ""))}
+            psych = {
+                "status":           "OK",
+                "trades_analysed":  int(_pa.get("trades_analysed", 0)),
+                "grade":            _pa.get("overall_grade", "B"),
+                "discipline_score": max(0, 100 - 20 * int(_pa.get("n_flags", 0))),
+                "loss_aversion":        _bias("loss_aversion"),
+                "overtrading":          _bias("overtrading"),
+                "early_exit":           _bias("early_exit"),
+                "revenge_trading":      _bias("revenge_trading"),
+                "inconsistent_sizing":  _bias("inconsistent_sizing"),
+            }
+    except Exception as _e:
+        logger.warning(f"psychology compute failed: {_e}")
+        psych = {"status": "INSUFFICIENT_DATA", "trades_analysed": 0, "needed": 10}
 
     # ── 19. Exit engine status ─────────────────────────────────
     unrealized_pnl = 0.0
