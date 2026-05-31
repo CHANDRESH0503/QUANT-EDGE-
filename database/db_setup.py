@@ -90,6 +90,41 @@ class DatabaseSetup:
             # Per-category tracking in closed_trades (added 2026-05-25)
             # Allows per-category win-rate / PF analysis on historical trades.
             ("closed_trades", "trade_type", "TEXT DEFAULT 'swing'"),
+            # ── Attributable outcome loop (added 2026-05-31) ──────────────
+            # Entry context — captured at open, carried to close, so paper-
+            # trading P&L can be sliced by the decisions that produced it.
+            # Without these the learning loop records blind outcomes.
+            ("open_trades",   "confidence",      "REAL"),
+            ("open_trades",   "alignment",       "TEXT"),
+            ("open_trades",   "regime_at_entry", "TEXT"),
+            ("open_trades",   "entry_quality",   "TEXT"),
+            ("open_trades",   "regime_match",    "INTEGER"),
+            ("open_trades",   "size_mult",       "REAL"),
+            ("open_trades",   "atr_at_entry",    "REAL"),
+            ("open_trades",   "reward_risk",     "REAL"),
+            ("closed_trades", "confidence",      "REAL"),
+            ("closed_trades", "alignment",       "TEXT"),
+            ("closed_trades", "regime_at_entry", "TEXT"),
+            ("closed_trades", "entry_quality",   "TEXT"),
+            ("closed_trades", "regime_match",    "INTEGER"),
+            ("closed_trades", "size_mult",       "REAL"),
+            ("closed_trades", "atr_at_entry",    "REAL"),
+            ("closed_trades", "reward_risk",     "REAL"),
+            # Exit analytics — R-multiple, hold time, and MFE/MAE (max
+            # favorable / adverse excursion: reveals stop/target misplacement).
+            ("closed_trades", "r_multiple",      "REAL"),
+            ("closed_trades", "hold_hours",      "REAL"),
+            ("closed_trades", "mfe_pct",         "REAL"),
+            ("closed_trades", "mae_pct",         "REAL"),
+            # signal_outcomes — rich attribution tags for calibration slicing.
+            ("signal_outcomes", "category",      "TEXT"),
+            ("signal_outcomes", "entry_quality", "TEXT"),
+            ("signal_outcomes", "regime_match",  "INTEGER"),
+            ("signal_outcomes", "r_multiple",    "REAL"),
+            ("signal_outcomes", "hold_hours",    "REAL"),
+            ("signal_outcomes", "exit_reason",   "TEXT"),
+            ("signal_outcomes", "mfe_pct",       "REAL"),
+            ("signal_outcomes", "mae_pct",       "REAL"),
         ]
         for table, col, coltype in migrations:
             existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}

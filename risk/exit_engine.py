@@ -138,15 +138,29 @@ class ExitEngine:
         confidence:  float = 0.0,
         entry_quality: str = "",
         ticker:      str = "HDFCBANK.NS",
+        regime_match: Optional[bool] = None,
+        size_mult:   float = 1.0,
+        atr_at_entry: float = 0.0,
+        reward_risk: float = 0.0,
     ) -> int:
-        """Record a new open position. Returns position ID."""
+        """Record a new open position. Returns position ID.
+
+        The entry-context fields (confidence, alignment, regime_at_entry,
+        entry_quality, regime_match, size_mult, atr_at_entry, reward_risk) are
+        PERSISTED here so they can be carried into closed_trades on exit and
+        used for attributable outcome analysis. Previously these were accepted
+        as parameters but silently dropped — the learning loop was blind.
+        """
+        rm = None if regime_match is None else int(bool(regime_match))
         conn = self._connect()
         cur  = conn.execute("""
             INSERT INTO open_trades
             (signal_uuid, ticker, signal, entry_price, stop_price, target_price,
              shares, risk_amount, trade_type,
-             highest_price, lowest_price, status, opened_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+             highest_price, lowest_price, status, opened_at,
+             confidence, alignment, regime_at_entry, entry_quality,
+             regime_match, size_mult, atr_at_entry, reward_risk)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             signal_uuid or "",
             ticker,
@@ -156,11 +170,17 @@ class ExitEngine:
             entry_price,  # lowest  = entry at open
             "OPEN",
             str(datetime.now()),
+            float(confidence), alignment, regime, entry_quality,
+            rm, float(size_mult), float(atr_at_entry), float(reward_risk),
         ))
         pos_id = cur.lastrowid
         conn.commit()
         conn.close()
-        logger.info(f"Position opened: id={pos_id} {signal} {shares} @ ₹{entry_price:.2f}")
+        logger.info(
+            f"Position opened: id={pos_id} {signal} {shares} @ ₹{entry_price:.2f} "
+            f"| {trade_type} conf={confidence:.0%} align={alignment or '?'} "
+            f"SR={entry_quality or '?'} {'aligned' if rm else 'counter' if rm==0 else '?'}"
+        )
         return pos_id
 
     def close_position(self, position_id: int, exit_price: float, reason: str) -> Dict:
@@ -192,6 +212,7 @@ class ExitEngine:
             ticker      = pos.get("ticker")     or "HDFCBANK.NS"
             trade_type  = pos.get("trade_type") or "swing"
             opened_at   = pos.get("opened_at",  str(datetime.now()))
+            risk_amount = float(pos.get("risk_amount") or 0.0)
 
             if signal == "LONG":
                 pnl_pct = (exit_price - entry) / entry
@@ -200,24 +221,35 @@ class ExitEngine:
 
             pnl_amount = round(pnl_pct * entry * shares, 2)
 
-            try:
-                opened_dt = datetime.strptime(str(opened_at)[:19], "%Y-%m-%d %H:%M:%S")
-                hold_days = (datetime.now() - opened_dt).days
-            except Exception:
-                hold_days = 0
+            hold_days, hold_hours = self._hold_time(opened_at)
+            # R-multiple: realised P&L in units of the risk taken. The single
+            # most important per-trade stat — expectancy is just mean(R).
+            r_multiple = round(pnl_amount / risk_amount, 3) if risk_amount > 0 else None
+            # MFE/MAE: best/worst the trade looked, in % from entry (direction-
+            # aware). High MFE on a loser = target too far / exited too late;
+            # high MAE on a winner = stop too tight, got lucky.
+            mfe_pct, mae_pct = self._excursions(pos, entry, signal)
 
             # Atomic: INSERT then DELETE in the same connection/transaction
             conn.execute("""
                 INSERT INTO closed_trades
                 (signal_uuid, ticker, signal, trade_type,
                  entry_price, exit_price, shares,
-                 pnl_amount, pnl_pct, exit_reason, close_date, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                 pnl_amount, pnl_pct, exit_reason, close_date, status,
+                 confidence, alignment, regime_at_entry, entry_quality,
+                 regime_match, size_mult, atr_at_entry, reward_risk,
+                 r_multiple, hold_hours, mfe_pct, mae_pct)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 signal_uuid, ticker, signal, trade_type,
                 entry, exit_price, shares,
                 pnl_amount, round(pnl_pct, 6),
                 reason, str(datetime.now()), "CLOSED",
+                pos.get("confidence"), pos.get("alignment"),
+                pos.get("regime_at_entry"), pos.get("entry_quality"),
+                pos.get("regime_match"), pos.get("size_mult"),
+                pos.get("atr_at_entry"), pos.get("reward_risk"),
+                r_multiple, round(hold_hours, 2), mfe_pct, mae_pct,
             ))
             conn.execute("DELETE FROM open_trades WHERE id=?", (position_id,))
             conn.commit()
@@ -235,13 +267,25 @@ class ExitEngine:
             "signal_uuid": signal_uuid,
             "ticker":      ticker,
             "trade_type":  trade_type,
+            "category":    trade_type,
             "entry":       entry,
             "exit":        exit_price,
             "shares":      shares,
             "pnl_amount":  pnl_amount,
             "pnl_pct":     pnl_pct,
             "hold_days":   hold_days,
+            "hold_hours":  round(hold_hours, 2),
+            "r_multiple":  r_multiple,
+            "mfe_pct":     mfe_pct,
+            "mae_pct":     mae_pct,
             "reason":      reason,
+            # Entry context carried through so OutcomeTracker needs no re-query
+            "confidence":    pos.get("confidence"),
+            "alignment":     pos.get("alignment"),
+            "regime":        pos.get("regime_at_entry"),
+            "entry_quality": pos.get("entry_quality"),
+            "regime_match":  pos.get("regime_match"),
+            "risk_amount":   risk_amount,
         }
 
         # Auto-write outcome for learning loop
@@ -260,6 +304,41 @@ class ExitEngine:
             OutcomeTracker(self.db_path).record(trade)
         except Exception as e:
             logger.warning(f"outcome_tracker failed: {e}")
+
+    @staticmethod
+    def _hold_time(opened_at) -> tuple:
+        """Return (hold_days, hold_hours) from the open timestamp."""
+        try:
+            opened_dt = datetime.strptime(str(opened_at)[:19], "%Y-%m-%d %H:%M:%S")
+            delta = datetime.now() - opened_dt
+            return delta.days, delta.total_seconds() / 3600.0
+        except Exception:
+            return 0, 0.0
+
+    @staticmethod
+    def _excursions(pos: Dict, entry: float, signal: str) -> tuple:
+        """
+        Max favorable / adverse excursion in % from entry, direction-aware.
+
+        Uses the highest/lowest price tracked while the position was open
+        (updated every exit-check tick). For a LONG the high is favorable and
+        the low is adverse; for a SHORT it inverts. Returns (mfe_pct, mae_pct)
+        as positive/negative percentages, or (None, None) if untracked.
+        """
+        try:
+            hi = float(pos.get("highest_price") or entry)
+            lo = float(pos.get("lowest_price")  or entry)
+            if entry <= 0:
+                return None, None
+            if signal == "LONG":
+                mfe = (hi - entry) / entry
+                mae = (lo - entry) / entry
+            else:  # SHORT — a falling price is favorable
+                mfe = (entry - lo) / entry
+                mae = (entry - hi) / entry
+            return round(mfe, 6), round(mae, 6)
+        except Exception:
+            return None, None
 
     # ─────────────────────────────────────────────────────────────
     # EXIT CONDITION CHECKS
@@ -473,6 +552,7 @@ class ExitEngine:
 
             book_shares = max(1, int(total_shares * book_pct))
             remain      = max(0, total_shares - book_shares)
+            risk_amount = float(pos.get("risk_amount") or 0.0)
 
             if signal == "LONG":
                 pnl_pct = (exit_price - entry) / entry
@@ -481,17 +561,31 @@ class ExitEngine:
 
             pnl_amount = round(pnl_pct * entry * book_shares, 2)
 
+            # R-multiple on the booked slice — risk scales with the fraction booked.
+            booked_risk = risk_amount * book_pct
+            r_multiple  = round(pnl_amount / booked_risk, 3) if booked_risk > 0 else None
+            _, hold_hours = self._hold_time(pos.get("opened_at", str(datetime.now())))
+            mfe_pct, mae_pct = self._excursions(pos, entry, signal)
+
             conn.execute("""
                 INSERT INTO closed_trades
                 (signal_uuid, ticker, signal, trade_type,
                  entry_price, exit_price, shares,
-                 pnl_amount, pnl_pct, exit_reason, close_date, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                 pnl_amount, pnl_pct, exit_reason, close_date, status,
+                 confidence, alignment, regime_at_entry, entry_quality,
+                 regime_match, size_mult, atr_at_entry, reward_risk,
+                 r_multiple, hold_hours, mfe_pct, mae_pct)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 signal_uuid, ticker, signal, trade_type,
                 entry, exit_price, book_shares,
                 pnl_amount, round(pnl_pct, 6),
                 f"{reason}_PARTIAL", str(datetime.now()), "CLOSED",
+                pos.get("confidence"), pos.get("alignment"),
+                pos.get("regime_at_entry"), pos.get("entry_quality"),
+                pos.get("regime_match"), pos.get("size_mult"),
+                pos.get("atr_at_entry"), pos.get("reward_risk"),
+                r_multiple, round(hold_hours, 2), mfe_pct, mae_pct,
             ))
 
             if remain > 0:

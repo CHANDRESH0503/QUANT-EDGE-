@@ -628,11 +628,15 @@ class MultiBankOrchestrator:
                     risk_amount  = float(sig.get("risk_amount",  0)),
                     trade_type   = cat,
                     signal_uuid  = signal.get("signal_uuid", ""),
-                    alignment    = signal.get("alignment",   ""),
-                    regime       = signal.get("regime",      ""),
+                    alignment    = sig.get("alignment", signal.get("alignment", "")),
+                    regime       = sig.get("regime",    signal.get("regime",    "")),
                     confidence   = float(sig.get("confidence", 0)),
                     entry_quality= sig.get("entry_quality", ""),
                     ticker       = ticker,
+                    regime_match = sig.get("regime_match"),
+                    size_mult    = float(sig.get("size_mult",   1.0)),
+                    atr_at_entry = float(sig.get("atr",         0.0)),
+                    reward_risk  = float(sig.get("reward_risk", 0.0)),
                 )
                 logger.info(
                     f"[{ticker}] opened paper trade: {cat} {sig['signal']} "
@@ -1069,6 +1073,17 @@ class MultiBankOrchestrator:
             self._safe_telegram(perf.format_telegram(report), "evening_perf")
         except Exception as e:
             logger.warning(f"evening performance report: {e}")
+
+        # Outcome attribution — which decisions actually have edge. The core
+        # paper-trading deliverable: win-rate/PF/expectancy by category,
+        # aligned-vs-counter, S/R grade, alignment grade.
+        try:
+            from risk.outcome_tracker import OutcomeTracker
+            self._safe_telegram(
+                OutcomeTracker(self.db_path).attribution_report(), "attribution"
+            )
+        except Exception as e:
+            logger.warning(f"attribution report: {e}")
 
         if datetime.now().weekday() == 4:   # Friday → psychology check
             try:
