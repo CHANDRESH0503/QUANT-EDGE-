@@ -915,17 +915,30 @@ class SignalEngine:
                 (direction == "LONG"  and "BEAR" in regime) or
                 (direction == "SHORT" and "BULL" in regime)
             )
-            if regime_adverse:
+            # ── Only flag a GENUINE regime flip, never a deliberate probe ──
+            # A counter-regime swing/intraday entry is allowed by design (0.5×
+            # size + raised Gate 6 threshold). It is adverse FROM BIRTH, so the
+            # raw `regime_adverse` test fires the instant we re-observe it and
+            # `REGIME_FLIP_EXIT` churns it out at a ~0.2% cost loop (entry==exit).
+            # Real P1-2 case: a position opened ALIGNED whose regime has since
+            # FLIPPED against it. Gate on both: opened aligned (regime_match=1)
+            # AND the regime name actually changed from entry. Counter-regime
+            # probes (regime_match=0) are left to their own stop/target/time-exit.
+            opened_aligned  = bool(int(pos.get("regime_match", 0) or 0))
+            regime_at_entry = str(pos.get("regime_at_entry") or "")
+            regime_flipped  = bool(regime_at_entry) and (regime_at_entry != regime)
+            if regime_adverse and opened_aligned and regime_flipped:
                 alerts.append({
-                    "type":         "REGIME_CHANGE",
-                    "category":     cat,
-                    "open_signal":  direction,
-                    "model_signal": model_dir,
-                    "regime":       regime,
-                    "ticker":       ticker,
-                    "entry_price":  entry,
-                    "stop_price":   stop,
-                    "position_id":  pos.get("id"),
+                    "type":            "REGIME_CHANGE",
+                    "category":        cat,
+                    "open_signal":     direction,
+                    "model_signal":    model_dir,
+                    "regime":          regime,
+                    "regime_at_entry": regime_at_entry,
+                    "ticker":          ticker,
+                    "entry_price":     entry,
+                    "stop_price":      stop,
+                    "position_id":     pos.get("id"),
                 })
 
         return alerts

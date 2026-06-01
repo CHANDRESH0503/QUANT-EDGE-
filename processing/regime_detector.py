@@ -108,6 +108,21 @@ class RegimeDetector:
         },
     }
 
+    # ── Regime persistence (anti-whipsaw) ─────────────────────────────
+    # The regime gates EVERYTHING downstream — Gate 6 thresholds, position
+    # sizing, the counter-regime hard blocks. A single noisy cycle must NOT flip
+    # it. A candidate regime must persist REGIME_CONFIRM_CYCLES consecutive
+    # detections before the committed regime switches. EXCEPTION: committing
+    # INTO HIGH_VOLATILITY is immediate (you do not wait to confirm a vol spike).
+    # 20-yr rule: slow to commit to a new trend, fast to cut risk.
+    # While a flip is unconfirmed the previous regime is held but flagged
+    # low-stability (HOLD_STABILITY) so downstream gates trade it with caution.
+    REGIME_CONFIRM_CYCLES = 3
+    _FAST_COMMIT_REGIMES  = {"HIGH_VOLATILITY"}
+    HOLD_STABILITY        = 0.34   # contested-hold: > MIN_STABILITY(0.25) so it
+                                   # doesn't hard-block, < 0.40 so low_stability fires
+    _RAW_HISTORY_MAX      = 20
+
     # Per-ticker model paths — each bank has its own HMM trained on its own
     # 25yr return/volatility distribution. A single shared model causes the
     # HDFCBANK scaler to wildly misscale IndusInd's post-crash features.
@@ -126,8 +141,13 @@ class RegimeDetector:
         self.n_components = n_components
         self._model       = None
         self._scaler      = None
+        # Regime persistence state (anti-whipsaw). One detector per bank lives
+        # for the orchestrator's lifetime, so this carries across cycles.
+        self._committed_regime: Optional[str] = None
+        self._raw_history:      List[str]     = []   # recent RAW (pre-commit) regimes
         self._setup_db()
         self._load_model()
+        self._seed_committed_from_db()
 
     # ─────────────────────────────────────────────────────────────
     # PUBLIC
@@ -254,6 +274,15 @@ class RegimeDetector:
                         f"(spread={spread:.2%}, stability capped at 65%)"
                     )
 
+        # ── Anti-whipsaw persistence ──────────────────────────────
+        # Smooth the raw per-cycle classification: a new regime must be
+        # confirmed across REGIME_CONFIRM_CYCLES cycles before it is committed
+        # (HIGH_VOLATILITY excepted). Prevents a single noisy cycle — most often
+        # the EMA override hugging the ±1.5% spread threshold — from flipping the
+        # regime that gates every downstream decision. Snapshots store the
+        # COMMITTED regime so the trend/flip counter reflects genuine changes.
+        result = self._apply_persistence(result)
+
         # Save to DB for trend tracking
         self._save_regime_snapshot(result)
 
@@ -343,6 +372,77 @@ class RegimeDetector:
             "dominant": dominant,
             "current":  regimes[0] if regimes else "UNKNOWN",
         }
+
+    # ─────────────────────────────────────────────────────────────
+    # PERSISTENCE (anti-whipsaw)
+    # ─────────────────────────────────────────────────────────────
+
+    def _seed_committed_from_db(self) -> None:
+        """Seed the committed regime from the latest snapshot so a process
+        restart resumes the live regime instead of flipping on the first cycle."""
+        try:
+            conn = self._connect()
+            row  = conn.execute("""
+                SELECT regime FROM regime_snapshots
+                WHERE  ticker = ? OR ticker IS NULL
+                ORDER  BY detected_at DESC LIMIT 1
+            """, (self.ticker,)).fetchone()
+            conn.close()
+            if row and row[0]:
+                self._committed_regime = row[0]
+        except Exception as e:
+            logger.debug(f"[{self.ticker}] seed committed regime failed: {e}")
+
+    def _apply_persistence(self, result: Dict) -> Dict:
+        """Return the COMMITTED regime result, applying confirmation hysteresis.
+
+        A raw regime that differs from the committed one only takes effect after
+        REGIME_CONFIRM_CYCLES consecutive raw detections (immediate for
+        HIGH_VOLATILITY). Until then the previous regime is held, flagged
+        low-stability. `result` is the raw per-cycle classification.
+        """
+        raw = result["regime"]
+        self._raw_history.append(raw)
+        if len(self._raw_history) > self._RAW_HISTORY_MAX:
+            self._raw_history = self._raw_history[-self._RAW_HISTORY_MAX:]
+
+        prev = self._committed_regime
+        # First ever cycle, or no change requested → commit the raw regime.
+        if prev is None or raw == prev:
+            self._committed_regime = raw
+            return result
+
+        # Fast de-risk: committing INTO a vol spike is immediate, no confirmation.
+        if raw in self._FAST_COMMIT_REGIMES:
+            logger.info(f"[{self.ticker}] Regime {prev} → {raw} (fast de-risk, no confirm)")
+            self._committed_regime = raw
+            return result
+
+        # Otherwise require N consecutive raw detections of the new regime.
+        recent = self._raw_history[-self.REGIME_CONFIRM_CYCLES:]
+        if len(recent) >= self.REGIME_CONFIRM_CYCLES and all(r == raw for r in recent):
+            logger.info(
+                f"[{self.ticker}] Regime {prev} → {raw} confirmed "
+                f"({self.REGIME_CONFIRM_CYCLES} consecutive cycles) — committing"
+            )
+            self._committed_regime = raw
+            return result
+
+        # Not yet confirmed — HOLD the previous regime, marked low-stability so
+        # downstream gates demand more conviction on a contested regime.
+        logger.info(
+            f"[{self.ticker}] Regime flip {prev} → {raw} NOT confirmed "
+            f"({recent.count(raw)}/{self.REGIME_CONFIRM_CYCLES}) — holding {prev}"
+        )
+        return self._build_result(
+            prev, self.HOLD_STABILITY, self._regime_probs_for(prev, self.HOLD_STABILITY)
+        )
+
+    def _regime_probs_for(self, regime: str, stability: float) -> Dict:
+        """Consistent prob dict putting `stability` mass on `regime` (rest split)."""
+        rest = max(0.0, (1.0 - stability) / 3.0)
+        return {r: (round(stability, 3) if r == regime else round(rest, 3))
+                for r in self.REGIME_NAMES.values()}
 
     # ─────────────────────────────────────────────────────────────
     # HMM DETECTION
