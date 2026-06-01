@@ -10,6 +10,7 @@ import os
 import re
 import gzip
 import time
+import json
 import zlib
 import urllib.request
 import urllib.error
@@ -59,34 +60,42 @@ _FETCH_TIMEOUT = 20   # seconds per feed request
 # ── GDELT DOC 2.0 API — datacenter-friendly bank-specific source ──────────────
 # Google News and the ET topic RSS feeds are both unusable from the VPS:
 # Google News IP-blocks DigitalOcean ranges, and ET's per-bank topic RSS now
-# returns an empty 776-byte shell (0 entries). GDELT's DOC API takes a per-bank
-# query, returns recent global news as RSS, needs no key, and serves cloud IPs
-# without WAF blocks — so it becomes the per-bank PRIMARY source on the VPS.
-# Caveat: GDELT rate-limits rapid sequential calls (HTTP 429). We throttle to
-# one request every `_GDELT_MIN_INTERVAL_SEC` and retry once on 429.
-GDELT_DOC_API           = "https://api.gdeltproject.org/api/v2/doc/doc"
-GDELT_TIMESPAN          = "7d"   # matches MAX_ARTICLE_AGE_DAYS
-GDELT_MAXRECORDS        = 75
-_GDELT_MIN_INTERVAL_SEC = 6.0
-_gdelt_last_fetch       = 0.0
+# returns an empty 776-byte shell (0 entries). GDELT's DOC API returns recent
+# global news as RSS, needs no key, and serves cloud IPs without WAF blocks —
+# so it is the bank news PRIMARY on the VPS.
+#
+# CRITICAL — GDELT aggressively rate-limits (HTTP 429): one query every few
+# seconds at most, and bursts trip a multi-minute penalty box. Fetching one
+# query PER BANK (5×/cycle, ×3 with retries) reliably 429s every bank after the
+# first. So we fetch ONE COMBINED query for all 5 banks per cycle and cache it
+# class-level (universe pattern, like intermarket — Rule #19); each bank then
+# keyword-filters the shared result. That's 1 GDELT request per ~13 min.
+GDELT_DOC_API        = "https://api.gdeltproject.org/api/v2/doc/doc"
+GDELT_TIMESPAN       = "7d"    # matches MAX_ARTICLE_AGE_DAYS
+GDELT_MAXRECORDS     = 250     # combined 5-bank query — give every bank coverage
+# One OR'd query covering the whole universe. Each bank's keyword filter
+# (`_is_relevant`) selects its own articles from the shared result set.
+GDELT_COMBINED_QUERY = (
+    '("HDFC Bank" OR "ICICI Bank" OR "Kotak Mahindra Bank" '
+    'OR "Axis Bank" OR "IndusInd Bank")'
+)
+# Cache TTL must be < the 15-min news cycle so each cycle gets one fresh fetch.
+_GDELT_CACHE_TTL_SEC = 780     # 13 min
 
 
-def _gdelt_url(query: str) -> str:
-    """Build a GDELT DOC API RSS URL for a per-bank query (newest first)."""
+def _gdelt_url(query: str, maxrecords: int = GDELT_MAXRECORDS, fmt: str = "json") -> str:
+    """Build a GDELT DOC API URL for a query (newest first).
+
+    JSON is the default and the format we actually use — GDELT's RSS `<pubDate>`
+    is malformed (feedparser misreads it as a month-old date and the recency
+    filter then drops fresh articles). The JSON `seendate` field is a clean
+    `YYYYMMDDTHHMMSSZ` timestamp, so we parse that instead.
+    """
     q = urllib.parse.quote(query)
     return (
-        f"{GDELT_DOC_API}?query={q}&mode=ArtList&format=rss"
-        f"&timespan={GDELT_TIMESPAN}&sortby=datedesc&maxrecords={GDELT_MAXRECORDS}"
+        f"{GDELT_DOC_API}?query={q}&mode=ArtList&format={fmt}"
+        f"&timespan={GDELT_TIMESPAN}&sortby=datedesc&maxrecords={maxrecords}"
     )
-
-
-def _throttle_gdelt() -> None:
-    """Space GDELT requests ≥ _GDELT_MIN_INTERVAL_SEC apart to avoid HTTP 429."""
-    global _gdelt_last_fetch
-    wait = _GDELT_MIN_INTERVAL_SEC - (time.monotonic() - _gdelt_last_fetch)
-    if wait > 0:
-        time.sleep(wait)
-    _gdelt_last_fetch = time.monotonic()
 
 
 def _fetch_feed_bytes(url: str, _retried_429: bool = False) -> Optional[bytes]:
@@ -257,6 +266,12 @@ class NewsFetcher:
     # whenever at least one row is inserted.
     _consecutive_empty_cycles: int = 0
     _empty_alarm_sent: bool = False
+
+    # Class-level GDELT cache — ONE combined universe query shared across all 5
+    # per-bank fetchers in a cycle, so we make a single GDELT request per ~13
+    # min instead of 5×3 (which 429s). Holds parsed feedparser entries.
+    _gdelt_cache_ts: float = 0.0
+    _gdelt_cache_entries: list = []
 
     def fetch_all(self) -> Dict[str, int]:
         """
@@ -476,11 +491,11 @@ class NewsFetcher:
         """
         global _VPS_LOGGED
         feeds: Dict[str, str] = {}
-        # GDELT per-bank query — works on VPS AND locally; the bank-specific
-        # primary now that Google News (IP-blocked) and ET topic RSS (empty) are
-        # both dead from the datacenter. Fetched first so it sets the freshness.
-        if cfg.get("gdelt_query"):
-            feeds["gdelt"] = _gdelt_url(cfg["gdelt_query"])
+        # GDELT — the bank-specific primary now that Google News (IP-blocked) and
+        # ET topic RSS (empty) are dead from the datacenter. The value is a
+        # sentinel: `_fetch_feed` serves "gdelt" from the shared class-level
+        # combined-query cache (one request/cycle for all banks), NOT this URL.
+        feeds["gdelt"] = "combined"
         if not IS_VPS:
             # Google News: date-restricted via when:Nd, sorted newest first.
             # Skipped on VPS — DigitalOcean IPs are in Google's datacenter
@@ -522,27 +537,84 @@ class NewsFetcher:
         except ValueError:
             return None
 
-    def _fetch_feed(self, source_name: str, feed_url: str) -> int:
-        """Parse one RSS feed and save relevant + recent articles for this bank.
+    @classmethod
+    def _get_gdelt_entries(cls) -> list:
+        """Return cached combined-GDELT entries, refreshing once per TTL window.
 
-        Fetches with a browser-like User-Agent so VPS IPs are not blocked by
-        Google News / Moneycontrol / LiveMint.  Falls back to bare feedparser
-        (which uses its own UA) only if the browser-UA fetch fails entirely.
+        ONE GDELT request per cycle for the whole universe (shared across all 5
+        per-bank fetchers) — avoids the per-bank 429 storm. On a fetch failure
+        (429/network) the stale cache is reused rather than going dark.
+
+        Uses GDELT JSON mode and the `seendate` timestamp (the RSS `<pubDate>`
+        is malformed → misparsed as month-old → dropped by recency). Returns a
+        list of plain dicts shaped like feedparser entries (`.get` compatible).
         """
-        # GDELT rate-limits bursts (HTTP 429) — space its requests out. Other
-        # feeds have no such limit, so only throttle the GDELT source.
+        age = time.monotonic() - cls._gdelt_cache_ts
+        if cls._gdelt_cache_entries and age < _GDELT_CACHE_TTL_SEC:
+            return cls._gdelt_cache_entries
+
+        url = _gdelt_url(GDELT_COMBINED_QUERY, maxrecords=GDELT_MAXRECORDS, fmt="json")
+        raw = _fetch_feed_bytes(url)
+        if raw is None:
+            logger.warning(
+                "[gdelt] combined fetch failed (429/network) — reusing "
+                f"{len(cls._gdelt_cache_entries)} cached entries"
+            )
+            return cls._gdelt_cache_entries
+
+        try:
+            articles = json.loads(raw).get("articles", [])
+        except (ValueError, AttributeError) as e:
+            logger.warning(f"[gdelt] JSON parse failed ({e}) — keeping cache")
+            return cls._gdelt_cache_entries
+
+        entries = []
+        for a in articles:
+            title = (a.get("title") or "").strip()
+            if not title:
+                continue
+            # seendate "YYYYMMDDTHHMMSSZ" → ISO "YYYY-MM-DD HH:MM:SS" (parseable
+            # by _parse_published). Falls back to empty (→ stamped "now") if odd.
+            seen = a.get("seendate", "")
+            try:
+                pub = datetime.strptime(seen, "%Y%m%dT%H%M%SZ").isoformat(sep=" ", timespec="seconds")
+            except (ValueError, TypeError):
+                pub = ""
+            entries.append({
+                "title":     title,
+                "summary":   "",            # DOC API returns headline only
+                "published": pub,
+                "link":      a.get("url", ""),
+            })
+
+        if entries:
+            cls._gdelt_cache_entries = entries
+            cls._gdelt_cache_ts      = time.monotonic()
+            logger.info(f"[gdelt] combined universe fetch: {len(entries)} entries cached")
+        else:
+            logger.warning("[gdelt] combined fetch returned 0 entries — keeping cache")
+        return cls._gdelt_cache_entries
+
+    def _fetch_feed(self, source_name: str, feed_url: str) -> int:
+        """Fetch one source's entries and ingest the relevant+recent ones.
+
+        GDELT uses the shared class-level combined-query cache (one request per
+        cycle for all banks). All other feeds fetch their own RSS with a
+        browser-like UA (so VPS IPs aren't blocked), falling back to bare
+        feedparser only if the browser-UA fetch fails entirely.
+        """
         if source_name == "gdelt":
-            _throttle_gdelt()
+            entries = self._get_gdelt_entries()
+            return self._ingest_entries(source_name, entries)
 
         raw = _fetch_feed_bytes(feed_url)
         if raw is not None:
             feed = feedparser.parse(raw)
         else:
-            # Network error — fall back; feedparser will try directly and log
             logger.info(f"[{self.ticker}][{source_name}] browser fetch failed, trying feedparser direct")
             feed = feedparser.parse(feed_url)
 
-        n_entries = len(feed.entries)
+        n_entries   = len(feed.entries)
         http_status = getattr(feed, "status", "local")
         if n_entries == 0:
             logger.warning(
@@ -554,7 +626,14 @@ class NewsFetcher:
             logger.debug(
                 f"[{self.ticker}][{source_name}] {n_entries} entries (HTTP {http_status})"
             )
+        return self._ingest_entries(source_name, feed.entries)
 
+    def _ingest_entries(self, source_name: str, entries: list) -> int:
+        """Filter entries by this bank's keywords + recency and insert new rows.
+
+        Shared by RSS feeds and the GDELT combined cache — `entries` is any list
+        of objects supporting `.get("title"/"summary"/"published"/"link")`.
+        """
         conn      = self._connect()
         keywords  = BANK_NEWS_CONFIG[self.ticker]["keywords"]
         new_count = 0
@@ -562,7 +641,7 @@ class NewsFetcher:
         now       = datetime.now()
         cutoff    = now - timedelta(days=MAX_ARTICLE_AGE_DAYS)
 
-        for entry in feed.entries:
+        for entry in entries:
             title   = entry.get("title", "").strip()
             summary = self._clean_html(entry.get("summary", ""))
             if not title:
