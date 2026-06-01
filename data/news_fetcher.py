@@ -9,9 +9,11 @@ import logging
 import os
 import re
 import gzip
+import time
 import zlib
 import urllib.request
 import urllib.error
+import urllib.parse
 
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -54,8 +56,40 @@ _REQUEST_HEADERS = {
 }
 _FETCH_TIMEOUT = 20   # seconds per feed request
 
+# ── GDELT DOC 2.0 API — datacenter-friendly bank-specific source ──────────────
+# Google News and the ET topic RSS feeds are both unusable from the VPS:
+# Google News IP-blocks DigitalOcean ranges, and ET's per-bank topic RSS now
+# returns an empty 776-byte shell (0 entries). GDELT's DOC API takes a per-bank
+# query, returns recent global news as RSS, needs no key, and serves cloud IPs
+# without WAF blocks — so it becomes the per-bank PRIMARY source on the VPS.
+# Caveat: GDELT rate-limits rapid sequential calls (HTTP 429). We throttle to
+# one request every `_GDELT_MIN_INTERVAL_SEC` and retry once on 429.
+GDELT_DOC_API           = "https://api.gdeltproject.org/api/v2/doc/doc"
+GDELT_TIMESPAN          = "7d"   # matches MAX_ARTICLE_AGE_DAYS
+GDELT_MAXRECORDS        = 75
+_GDELT_MIN_INTERVAL_SEC = 6.0
+_gdelt_last_fetch       = 0.0
 
-def _fetch_feed_bytes(url: str) -> Optional[bytes]:
+
+def _gdelt_url(query: str) -> str:
+    """Build a GDELT DOC API RSS URL for a per-bank query (newest first)."""
+    q = urllib.parse.quote(query)
+    return (
+        f"{GDELT_DOC_API}?query={q}&mode=ArtList&format=rss"
+        f"&timespan={GDELT_TIMESPAN}&sortby=datedesc&maxrecords={GDELT_MAXRECORDS}"
+    )
+
+
+def _throttle_gdelt() -> None:
+    """Space GDELT requests ≥ _GDELT_MIN_INTERVAL_SEC apart to avoid HTTP 429."""
+    global _gdelt_last_fetch
+    wait = _GDELT_MIN_INTERVAL_SEC - (time.monotonic() - _gdelt_last_fetch)
+    if wait > 0:
+        time.sleep(wait)
+    _gdelt_last_fetch = time.monotonic()
+
+
+def _fetch_feed_bytes(url: str, _retried_429: bool = False) -> Optional[bytes]:
     """Download a feed URL with a browser-like UA.
 
     Returns raw bytes on success, None on network/HTTP error.
@@ -93,6 +127,11 @@ def _fetch_feed_bytes(url: str) -> Optional[bytes]:
             )
             return data
     except urllib.error.HTTPError as e:
+        # GDELT throttles bursts with 429 — back off once and retry before giving up.
+        if e.code == 429 and not _retried_429:
+            logger.info(f"HTTP 429 (rate-limited) — backing off 10s and retrying: {url[:80]}")
+            time.sleep(10)
+            return _fetch_feed_bytes(url, _retried_429=True)
         logger.warning(f"HTTP {e.code} fetching feed: {url[:80]}")
         return None
     except urllib.error.URLError as e:
@@ -107,6 +146,7 @@ def _fetch_feed_bytes(url: str) -> Optional[bytes]:
 BANK_NEWS_CONFIG: Dict[str, Dict] = {
     "HDFCBANK.NS": {
         "google_query": "HDFC+Bank+NSE+stock+India",
+        "gdelt_query":  '"HDFC Bank" India',
         "et_feed": (
             "https://economictimes.indiatimes.com/topic/hdfc-bank"
             "/rssfeeds/1715249571.cms"
@@ -118,6 +158,7 @@ BANK_NEWS_CONFIG: Dict[str, Dict] = {
     },
     "ICICIBANK.NS": {
         "google_query": "ICICI+Bank+NSE+stock+India",
+        "gdelt_query":  '"ICICI Bank" India',
         "et_feed": (
             "https://economictimes.indiatimes.com/topic/icici-bank"
             "/rssfeeds/315110307.cms"
@@ -128,6 +169,7 @@ BANK_NEWS_CONFIG: Dict[str, Dict] = {
     },
     "KOTAKBANK.NS": {
         "google_query": "Kotak+Mahindra+Bank+NSE+stock+India",
+        "gdelt_query":  '"Kotak Mahindra Bank"',
         "et_feed": (
             "https://economictimes.indiatimes.com/topic/kotak-mahindra-bank"
             "/rssfeeds/1715255371.cms"
@@ -139,6 +181,7 @@ BANK_NEWS_CONFIG: Dict[str, Dict] = {
     },
     "AXISBANK.NS": {
         "google_query": "Axis+Bank+NSE+stock+India",
+        "gdelt_query":  '"Axis Bank" India',
         "et_feed": (
             "https://economictimes.indiatimes.com/topic/axis-bank"
             "/rssfeeds/1715249541.cms"
@@ -150,6 +193,7 @@ BANK_NEWS_CONFIG: Dict[str, Dict] = {
     },
     "INDUSINDBK.NS": {
         "google_query": "IndusInd+Bank+NSE+stock+India",
+        "gdelt_query":  '"IndusInd Bank"',
         "et_feed": (
             "https://economictimes.indiatimes.com/topic/indusind-bank"
             "/rssfeeds/1715250067.cms"
@@ -418,15 +462,25 @@ class NewsFetcher:
         """Build the RSS feed dict for this bank.
 
         Priority (in fetch order):
-          1. google_news   — 100 date-sorted entries; skipped when QE_IS_VPS=1
-          2. et_bank       — ET per-bank topic RSS; VPS-friendly with browser UA
-          3. et_banking    — ET banking sector RSS (shared); extra coverage
-          4. moneycontrol  — shared; VPS-friendly with browser UA
-          5. livemint      — shared; VPS-friendly with browser UA
-          6. cnbctv18      — shared; VPS-friendly with browser UA
+          1. gdelt         — per-bank GDELT DOC API; the VPS bank-specific PRIMARY
+                             (datacenter-friendly, replaces dead Google News + ET)
+          2. google_news   — date-sorted entries; LOCAL ONLY (IP-blocked on VPS)
+          3. moneycontrol  — shared generic; VPS-friendly with browser UA
+          4. livemint      — shared generic; VPS-friendly with browser UA
+          5. cnbctv18      — shared generic; VPS-friendly with browser UA
+
+        The ET per-bank topic RSS (`cfg["et_feed"]`) and ET banking RSS are NO
+        LONGER fetched — both now return an empty 776-byte shell (0 entries).
+        GDELT replaces them as the bank-specific source. The `et_feed` field is
+        retained in BANK_NEWS_CONFIG so it can be re-enabled if ET restores it.
         """
         global _VPS_LOGGED
         feeds: Dict[str, str] = {}
+        # GDELT per-bank query — works on VPS AND locally; the bank-specific
+        # primary now that Google News (IP-blocked) and ET topic RSS (empty) are
+        # both dead from the datacenter. Fetched first so it sets the freshness.
+        if cfg.get("gdelt_query"):
+            feeds["gdelt"] = _gdelt_url(cfg["gdelt_query"])
         if not IS_VPS:
             # Google News: date-restricted via when:Nd, sorted newest first.
             # Skipped on VPS — DigitalOcean IPs are in Google's datacenter
@@ -437,12 +491,11 @@ class NewsFetcher:
                 f"&hl=en-IN&gl=IN&ceid=IN:en"
             )
         elif not _VPS_LOGGED:
-            logger.info("VPS mode (QE_IS_VPS=1): Google News disabled (IP-blocklisted)")
+            logger.info(
+                "VPS mode (QE_IS_VPS=1): Google News disabled (IP-blocklisted); "
+                "GDELT is the per-bank primary"
+            )
             _VPS_LOGGED = True
-        # ET per-bank topic RSS — reliable from VPS with browser UA.
-        feeds["et_topic"] = cfg["et_feed"]
-        # ET banking sector (shared across all banks, keyword-filtered).
-        feeds["et_banking"] = _ET_BANKING_RSS
         feeds.update(_SHARED_FEEDS)
         return feeds
 
@@ -476,6 +529,11 @@ class NewsFetcher:
         Google News / Moneycontrol / LiveMint.  Falls back to bare feedparser
         (which uses its own UA) only if the browser-UA fetch fails entirely.
         """
+        # GDELT rate-limits bursts (HTTP 429) — space its requests out. Other
+        # feeds have no such limit, so only throttle the GDELT source.
+        if source_name == "gdelt":
+            _throttle_gdelt()
+
         raw = _fetch_feed_bytes(feed_url)
         if raw is not None:
             feed = feedparser.parse(raw)
