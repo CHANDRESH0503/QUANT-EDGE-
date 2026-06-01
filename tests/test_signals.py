@@ -130,7 +130,9 @@ class TestGate2RuleFilter(unittest.TestCase):
         self.assertGreaterEqual(ctx["n_passed"], 8)
 
     def test_earnings_week_hard_fail(self):
-        f = {**self._good_features(), "earnings_risk_flag": 1}
+        # Gate 2 reads `days_to_earnings` (hard fail within 3 days), not the
+        # old `earnings_risk_flag` key. Hard-fail key is "earnings_risk".
+        f = {**self._good_features(), "days_to_earnings": 1}
         passed, ctx = self.gate.check(f, self._good_context())
         self.assertFalse(passed)
         self.assertIn("earnings_risk", ctx.get("hard_failed", []))
@@ -139,7 +141,8 @@ class TestGate2RuleFilter(unittest.TestCase):
         f = {**self._good_features(), "india_vix_level": 28}
         passed, ctx = self.gate.check(f, self._good_context())
         self.assertFalse(passed)
-        self.assertIn("vix_panic", ctx.get("hard_failed", []))
+        # Hard-fail key was renamed vix_panic → vix_halt (VIX ≥ 28 = HALT level).
+        self.assertIn("vix_halt", ctx.get("hard_failed", []))
 
     def test_high_anomaly_hard_fail(self):
         ctx = {**self._good_context(), "anomaly_severity": "HIGH"}
@@ -236,11 +239,15 @@ class TestGate6Confidence(unittest.TestCase):
         }
 
     def _risk_halted(self, reason="monthly_dd"):
+        # Gate 6 consults circuit_breaker_level FIRST (G6-2 — it is the
+        # authoritative halt signal), so set it here to exercise that path.
         return {
-            "trading_allowed":       False,
-            "final_size_mult":       0.0,
-            "monthly_dd_flag":       1 if reason == "monthly_dd" else 0,
-            "consecutive_loss_halt": 1 if reason == "losses" else 0,
+            "trading_allowed":         False,
+            "final_size_mult":         0.0,
+            "circuit_breaker_level":   "HALT",
+            "circuit_breaker_reason":  "monthly loss limit",
+            "monthly_dd_flag":         1 if reason == "monthly_dd" else 0,
+            "consecutive_loss_halt":   1 if reason == "losses" else 0,
         }
 
     def test_sufficient_confidence_passes(self):
@@ -268,12 +275,15 @@ class TestGate6Confidence(unittest.TestCase):
         self.assertFalse(passed, "SMALL capital should require A+ alignment")
 
     def test_small_capital_a_plus_passes(self):
+        # SMALL swing base threshold 0.68 + 0.03 provisional edge premium (P2)
+        # = 0.71 effective, so use 0.73 to clear it.
         passed, ctx = self.gate.check(
-            primary_conf=0.70, alignment="A+",
+            primary_conf=0.73, alignment="A+",
             capital_mode="SMALL", risk_context=self._risk_ok(),
             model_type="swing",
         )
         self.assertTrue(passed)
+        self.assertEqual(ctx["edge_premium"], 0.03)
 
     def test_circuit_breaker_blocks(self):
         passed, ctx = self.gate.check(

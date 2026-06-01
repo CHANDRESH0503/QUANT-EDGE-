@@ -219,6 +219,16 @@ class TestRiskFeatures(unittest.TestCase):
 
     def setUp(self):
         self.feat = RiskFeatures()
+        # Paper-trading sets FORCE_CAPITAL_MODE=FULL (config default), which
+        # bypasses ₹-based auto-detection. These tests validate the detection
+        # bands themselves, so neutralise the override and restore it after.
+        from config import TradingConfig
+        self._saved_force = TradingConfig.FORCE_CAPITAL_MODE
+        TradingConfig.FORCE_CAPITAL_MODE = ""
+
+    def tearDown(self):
+        from config import TradingConfig
+        TradingConfig.FORCE_CAPITAL_MODE = self._saved_force
 
     def _make_anomaly(self, detected=False):
         return {

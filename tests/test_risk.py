@@ -17,6 +17,18 @@ from risk.circuit_breaker import CircuitBreaker
 
 class TestCapitalMode(unittest.TestCase):
 
+    def setUp(self):
+        # FORCE_CAPITAL_MODE=FULL (paper-trading default in config) bypasses
+        # ₹-based auto-detection. These tests validate the detection bands, so
+        # neutralise the override for the duration of the class and restore it.
+        from config import TradingConfig
+        self._saved_force = TradingConfig.FORCE_CAPITAL_MODE
+        TradingConfig.FORCE_CAPITAL_MODE = ""
+
+    def tearDown(self):
+        from config import TradingConfig
+        TradingConfig.FORCE_CAPITAL_MODE = self._saved_force
+
     def test_small_capital_detection(self):
         self.assertEqual(CapitalMode.detect(10_000),  "SMALL")
         self.assertEqual(CapitalMode.detect(49_999),  "SMALL")
@@ -153,8 +165,10 @@ class TestCircuitBreaker(unittest.TestCase):
         self.assertEqual(status["level"], "OK")
 
     def test_monthly_halt_full_mode(self):
+        # FULL halt threshold is -15% (THRESHOLDS["FULL"]["halt"]=0.15); -12%
+        # is only PAUSE. Use -16% to cross the halt line.
         allowed, status = self.cb.check(
-            capital_mode="FULL", monthly_dd_pct=-0.12,
+            capital_mode="FULL", monthly_dd_pct=-0.16,
             consecutive_losses=0,
         )
         self.assertFalse(allowed)

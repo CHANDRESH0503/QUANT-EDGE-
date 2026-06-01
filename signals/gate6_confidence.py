@@ -35,6 +35,20 @@ class Gate6Confidence:
         "positional": {"SMALL": 0.65, "GROWING": 0.60, "FULL": 0.55},
     }
 
+    # Provisional per-category confidence premium (P2 — edge quality).
+    # Swing (~0.46–0.60 CV) and positional (~0.49–0.64 CV) have the weakest
+    # 3-class model edge in the universe; intraday (~0.67–0.80) is strong. Until
+    # the paper-trading attribution loop PROVES a real per-category edge, demand
+    # extra conviction on the weak categories — a modest additive premium on top
+    # of the base threshold. It applies everywhere Gate 6 runs (live signal_engine
+    # AND the offline P0-3 pipeline backtest), so validation reflects live gating.
+    #
+    # Tradeoff: this slows paper-data collection on swing/positional (fewer trades
+    # → slower attribution). Remove (set to {}) or zero a category once attribution
+    # shows that category clears the scale-up bar (WR>52, PF>1.5). Folded into the
+    # same +0.15pp total threshold cap as the situational boosts.
+    PROVISIONAL_EDGE_PREMIUM = {"swing": 0.03, "positional": 0.05, "intraday": 0.0}
+
     MIN_ALIGNMENT = {
         "SMALL":   {"A+"},          # strictest — only best signals
         "GROWING": {"A+", "A"},
@@ -109,6 +123,11 @@ class Gate6Confidence:
 
         # ── Confidence threshold (VIX- and data-quality-adaptive) ─
         threshold = self.THRESHOLDS.get(model_type, {}).get(capital_mode, 0.60)
+        # P2 provisional edge premium — weak-edge categories (swing/positional)
+        # demand more conviction until attribution proves edge. See class const.
+        edge_premium = self.PROVISIONAL_EDGE_PREMIUM.get(model_type, 0.0)
+        if edge_premium > 0:
+            threshold = min(0.95, threshold + edge_premium)
         india_vix = float(risk_context.get("india_vix", 0.0))
         # VIX penalty is CATEGORY-AWARE (G6-1). 20yr rule: elevated VIX is the
         # SOURCE of alpha for intraday — the market moves 2–3%/session, exactly
@@ -136,12 +155,17 @@ class Gate6Confidence:
                     f"Confidence {primary_conf:.0%} < "
                     f"{threshold:.0%} threshold "
                     f"({capital_mode} {model_type} mode"
-                    f"{', +DQ boost' if data_quality_boost > 0 else ''})"
+                    # G6-5: the boost stacks counter-regime/HIGH_VOL/instability/
+                    # stale-data/DQ — show the magnitude, don't falsely call it "DQ".
+                    f"{f', +{data_quality_boost:.0%} thr-adj' if data_quality_boost > 0 else ''}"
+                    f"{f', +{edge_premium:.0%} edge-premium' if edge_premium > 0 else ''}"
+                    f"{f', +{(_vix_boost[0] if india_vix>25 else _vix_boost[1]):.0%} VIX' if india_vix > 20 else ''})"
                 ),
                 "confidence":  primary_conf,
                 "threshold":   threshold,
                 "capital_mode":capital_mode,
                 "data_quality_boost": data_quality_boost,
+                "edge_premium": edge_premium,
             }
 
         # ── Final size multiplier (all gates combined) ─────────────
@@ -158,4 +182,5 @@ class Gate6Confidence:
             "alignment":     alignment,
             "final_size_mult":final_mult,
             "data_quality_boost": data_quality_boost,
+            "edge_premium":  edge_premium,
         }
