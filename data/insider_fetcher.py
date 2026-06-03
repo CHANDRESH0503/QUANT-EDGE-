@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import numpy as np
 
+from config import get_bank_config
+
 logger = logging.getLogger(__name__)
 
 HDFC_BSE_CODE  = "500180"
@@ -46,9 +48,14 @@ class InsiderFetcher:
         "Referer": "https://www.bseindia.com/",
     }
 
-    def __init__(self, db_path: str = "database/trading.db"):
-        self.db_path = db_path
-        self._session = self._create_session()
+    def __init__(self, db_path: str = "database/trading.db",
+                 ticker: str = "HDFCBANK.NS"):
+        self.db_path    = db_path
+        self.ticker     = ticker
+        cfg             = get_bank_config(ticker)
+        self.nse_symbol = cfg.get("nse_symbol", HDFC_NSE_SYM)
+        self.bse_code   = cfg.get("bse_code",   HDFC_BSE_CODE)
+        self._session   = self._create_session()
         self._setup_db()
 
     # ─────────────────────────────────────────────────────────────
@@ -111,32 +118,45 @@ class InsiderFetcher:
         """
         try:
             from data.nse_session import nse_get_json
+            # NSE requires the index param (omitting it returns 200 "missing index").
             url = (
                 f"https://www.nseindia.com/api/corporate-share-holdings-master"
-                f"?symbol={HDFC_NSE_SYM}"
+                f"?index=equities&symbol={self.nse_symbol}"
             )
-            quote_page = f"https://www.nseindia.com/get-quotes/equity?symbol={HDFC_NSE_SYM}"
+            quote_page = f"https://www.nseindia.com/get-quotes/equity?symbol={self.nse_symbol}"
             data = nse_get_json(self._session, url, referer=quote_page, page_url=quote_page)
-            if not isinstance(data, dict):
-                return
-            rows = data.get("data", [])
+            # Endpoint returns a BARE LIST of all historical quarters (newest first);
+            # tolerate a {"data": [...]} wrapper too.
+            rows = data if isinstance(data, list) else (
+                   data.get("data", []) if isinstance(data, dict) else [])
             if not rows:
                 return
 
-            latest = rows[0]  # most recent quarter
-            self._save_shareholding({
-                "quarter":          latest.get("date", ""),
-                "promoter_pct":     self._safe_float(latest.get("promoterAndPromoterGroupShareHolding", 0)),
-                "fii_pct":          self._safe_float(latest.get("foreignPortfolioInvestment", 0)),
-                "dii_pct":          self._safe_float(latest.get("mutualFunds", 0)),
-                "public_pct":       self._safe_float(latest.get("publicShareholding", 0)),
-                "pledge_pct":       self._safe_float(latest.get("totPledgedShares", 0)),
-                "total_shares":     self._safe_float(latest.get("totalNoOfShares", 0)),
-            })
-            logger.info(f"Shareholding updated: Promoter={latest.get('promoterAndPromoterGroupShareHolding')}%")
+            # Persist the most recent quarters so the 4-quarter promoter trend is
+            # available immediately (not after 4 live refreshes). Each row carries
+            # promoter+group % (`pr_and_prgrp`) and public % (`public_val`); FII/DII/
+            # pledge live only in the linked XBRL, not this summary — left 0.
+            saved = 0
+            for row in rows[:8]:
+                quarter = self._iso_quarter(row.get("date", ""))
+                if not quarter:
+                    continue
+                self._save_shareholding({
+                    "quarter":      quarter,
+                    "promoter_pct": self._safe_float(row.get("pr_and_prgrp", 0)),
+                    "fii_pct":      0.0,
+                    "dii_pct":      0.0,
+                    "public_pct":   self._safe_float(row.get("public_val", 0)),
+                    "pledge_pct":   0.0,
+                    "total_shares": 0.0,
+                })
+                saved += 1
+            if saved:
+                logger.info(f"[{self.ticker}] Shareholding: {saved} quarters saved, "
+                            f"latest promoter={rows[0].get('pr_and_prgrp')}%")
 
         except Exception as e:
-            logger.error(f"Shareholding fetch failed: {e}")
+            logger.error(f"[{self.ticker}] Shareholding fetch failed: {e}")
 
     def _fetch_block_deals(self) -> None:
         """
@@ -154,13 +174,14 @@ class InsiderFetcher:
                 data = data.get("data", [])
             if not isinstance(data, list):
                 return
-            hdfc_deals = [
+            # The block-deal feed is market-wide; keep only THIS bank's deals.
+            bank_deals = [
                 d for d in data
-                if HDFC_NSE_SYM in str(d.get("symbol", "")).upper()
+                if self.nse_symbol in str(d.get("symbol", "")).upper()
             ]
 
             conn = self._connect()
-            for deal in hdfc_deals:
+            for deal in bank_deals:
                 try:
                     qty   = self._safe_float(deal.get("quantity", 0))
                     price = self._safe_float(deal.get("price", 0))
@@ -168,10 +189,11 @@ class InsiderFetcher:
 
                     conn.execute("""
                         INSERT OR IGNORE INTO insider_block_deals
-                        (trade_date, client_name, buy_sell,
+                        (ticker, trade_date, client_name, buy_sell,
                          quantity, price, value_cr, deal_type, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
+                        self.ticker,
                         deal.get("date", str(datetime.now().date())),
                         deal.get("clientName", "Unknown"),
                         deal.get("buySell", "BUY"),
@@ -184,7 +206,7 @@ class InsiderFetcher:
             conn.close()
 
         except Exception as e:
-            logger.error(f"Block deals fetch failed: {e}")
+            logger.error(f"[{self.ticker}] Block deals fetch failed: {e}")
 
     # ─────────────────────────────────────────────────────────────
     # FEATURE BUILDERS
@@ -196,9 +218,10 @@ class InsiderFetcher:
         rows = conn.execute("""
             SELECT quarter, promoter_pct, pledge_pct
             FROM   shareholding_pattern
+            WHERE  ticker = ?
             ORDER  BY quarter DESC
             LIMIT  4
-        """).fetchall()
+        """, (self.ticker,)).fetchall()
         conn.close()
 
         if not rows:
@@ -239,14 +262,14 @@ class InsiderFetcher:
         # Today
         today_rows = conn.execute("""
             SELECT buy_sell, value_cr FROM insider_block_deals
-            WHERE trade_date = ?
-        """, (today,)).fetchall()
+            WHERE trade_date = ? AND ticker = ?
+        """, (today, self.ticker)).fetchall()
 
         # Last 5 days
         five_rows = conn.execute("""
             SELECT buy_sell, value_cr FROM insider_block_deals
-            WHERE trade_date >= ?
-        """, (five_ago,)).fetchall()
+            WHERE trade_date >= ? AND ticker = ?
+        """, (five_ago, self.ticker)).fetchall()
 
         conn.close()
 
@@ -271,9 +294,10 @@ class InsiderFetcher:
         rows = conn.execute("""
             SELECT fii_pct, dii_pct
             FROM   shareholding_pattern
+            WHERE  ticker = ?
             ORDER  BY quarter DESC
             LIMIT  2
-        """).fetchall()
+        """, (self.ticker,)).fetchall()
         conn.close()
 
         if not rows:
@@ -344,15 +368,25 @@ class InsiderFetcher:
         except (ValueError, TypeError):
             return 0.0
 
+    @staticmethod
+    def _iso_quarter(date_str: str) -> str:
+        """'31-MAR-2026' → '2026-03-31' so `quarter DESC` sorts chronologically."""
+        for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(str(date_str).strip(), fmt).strftime("%Y-%m-%d")
+            except (ValueError, AttributeError):
+                continue
+        return ""
+
     def _save_shareholding(self, data: Dict) -> None:
         conn = self._connect()
         conn.execute("""
             INSERT OR REPLACE INTO shareholding_pattern
-            (quarter, promoter_pct, fii_pct, dii_pct,
+            (ticker, quarter, promoter_pct, fii_pct, dii_pct,
              public_pct, pledge_pct, total_shares, created_at)
-            VALUES (?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?)
         """, (
-            data["quarter"], data["promoter_pct"], data["fii_pct"],
+            self.ticker, data["quarter"], data["promoter_pct"], data["fii_pct"],
             data["dii_pct"], data["public_pct"], data["pledge_pct"],
             data["total_shares"], str(datetime.now()),
         ))
@@ -374,22 +408,38 @@ class InsiderFetcher:
 
     def _setup_db(self) -> None:
         conn = sqlite3.connect(self.db_path)
+        # Per-bank migration: legacy tables were HDFC-only (no `ticker`, and a
+        # UNIQUE on quarter alone — only one bank's row could ever exist). These
+        # hold only refetchable public cache (never trades), so when the old
+        # shape is detected we drop+recreate rather than ALTER (SQLite can't
+        # change a UNIQUE constraint in place). Self-healing on local and VPS.
+        for tbl in ("shareholding_pattern", "insider_block_deals"):
+            try:
+                cols = [r[1] for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()]
+                if cols and "ticker" not in cols:
+                    conn.execute(f"DROP TABLE {tbl}")
+                    logger.info(f"Migrated {tbl} to per-bank schema (dropped legacy HDFC-only table)")
+            except Exception as e:
+                logger.warning(f"{tbl} migration check failed: {e}")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS shareholding_pattern (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                quarter       TEXT    UNIQUE,
+                ticker        TEXT    NOT NULL,
+                quarter       TEXT,
                 promoter_pct  REAL,
                 fii_pct       REAL,
                 dii_pct       REAL,
                 public_pct    REAL,
                 pledge_pct    REAL,
                 total_shares  REAL,
-                created_at    TEXT
+                created_at    TEXT,
+                UNIQUE(ticker, quarter)
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS insider_block_deals (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker      TEXT    NOT NULL,
                 trade_date  TEXT,
                 client_name TEXT,
                 buy_sell    TEXT,
@@ -398,10 +448,11 @@ class InsiderFetcher:
                 value_cr    REAL,
                 deal_type   TEXT,
                 created_at  TEXT,
-                UNIQUE(trade_date, client_name, buy_sell, quantity)
+                UNIQUE(ticker, trade_date, client_name, buy_sell, quantity)
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sh_quarter ON shareholding_pattern(quarter DESC)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_bd_date ON insider_block_deals(trade_date DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sh_quarter ON shareholding_pattern(ticker, quarter DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bd_date ON insider_block_deals(ticker, trade_date DESC)")
         conn.commit()
+        conn.close()
         conn.close()

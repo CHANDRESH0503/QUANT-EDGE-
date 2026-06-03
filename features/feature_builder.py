@@ -408,7 +408,7 @@ class FeatureBuilder:
         self.fii_fetcher      = FIIFetcher(db_path)
         self.global_fetcher   = GlobalFetcher(db_path)
         self.social_fetcher   = SocialFetcher(db_path)
-        self.insider_fetcher  = InsiderFetcher(db_path)
+        self.insider_fetcher  = InsiderFetcher(db_path, ticker=ticker)
         self.alt_fetcher      = AlternativeFetcher(db_path)
 
         # ── Feature assemblers ─────────────────────────────────────

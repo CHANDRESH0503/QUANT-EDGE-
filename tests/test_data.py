@@ -317,6 +317,52 @@ class TestBSEFetcherRobustness(unittest.TestCase):
         self.assertEqual(f.fetch_bse_announcements(), 0)
 
 
+class TestInsiderPerBank(unittest.TestCase):
+    """
+    Insider shareholding/block-deals are per-bank (DATA-2) — no HDFC proxy.
+    Rows must be ticker-scoped on read so Kotak/IndusInd (real promoters) don't
+    read HDFC's 0% and vice-versa.
+    """
+
+    def setUp(self):
+        self.db = tempfile.mktemp(suffix=".db")
+
+    def tearDown(self):
+        try: os.remove(self.db)
+        except OSError: pass
+
+    def test_iso_quarter_parsing(self):
+        from data.insider_fetcher import InsiderFetcher
+        self.assertEqual(InsiderFetcher._iso_quarter("31-MAR-2026"), "2026-03-31")
+        self.assertEqual(InsiderFetcher._iso_quarter("2025-12-31"), "2025-12-31")
+        self.assertEqual(InsiderFetcher._iso_quarter("garbage"), "")
+
+    def test_shareholding_is_ticker_scoped(self):
+        from data.insider_fetcher import InsiderFetcher
+        base = {"fii_pct": 0, "dii_pct": 0, "public_pct": 0,
+                "pledge_pct": 0, "total_shares": 0}
+        kotak = InsiderFetcher(db_path=self.db, ticker="KOTAKBANK.NS")
+        hdfc  = InsiderFetcher(db_path=self.db, ticker="HDFCBANK.NS")
+        kotak._save_shareholding({**base, "quarter": "2026-03-31", "promoter_pct": 25.87})
+        hdfc._save_shareholding({**base, "quarter": "2026-03-31", "promoter_pct": 0.0})
+        # Each reads only its own row — no cross-bank bleed.
+        self.assertEqual(kotak._get_promoter_trend()["current_pct"], 25.87)
+        self.assertEqual(hdfc._get_promoter_trend()["current_pct"], 0.0)
+
+    def test_legacy_table_migrated(self):
+        # A pre-DATA-2 HDFC-only table (no `ticker`) is dropped + recreated.
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE shareholding_pattern "
+                     "(id INTEGER PRIMARY KEY, quarter TEXT UNIQUE, promoter_pct REAL)")
+        conn.commit(); conn.close()
+        from data.insider_fetcher import InsiderFetcher
+        InsiderFetcher(db_path=self.db, ticker="ICICIBANK.NS")   # _setup_db migrates
+        conn = sqlite3.connect(self.db)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(shareholding_pattern)").fetchall()]
+        conn.close()
+        self.assertIn("ticker", cols)
+
+
 class TestNSESessionRetry(unittest.TestCase):
     """
     nse_get_json must recover the strict NSE endpoints (option-chain / insider)

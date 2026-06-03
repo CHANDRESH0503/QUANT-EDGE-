@@ -370,20 +370,23 @@ class DatabaseSetup:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS shareholding_pattern (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                quarter       TEXT    UNIQUE,
+                ticker        TEXT    NOT NULL,
+                quarter       TEXT,
                 promoter_pct  REAL,
                 fii_pct       REAL,
                 dii_pct       REAL,
                 public_pct    REAL,
                 pledge_pct    REAL,
                 total_shares  REAL,
-                created_at    TEXT
+                created_at    TEXT,
+                UNIQUE(ticker, quarter)
             )
         """)
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS insider_block_deals (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker      TEXT    NOT NULL,
                 trade_date  TEXT,
                 client_name TEXT,
                 buy_sell    TEXT,
@@ -392,7 +395,7 @@ class DatabaseSetup:
                 value_cr    REAL,
                 deal_type   TEXT    DEFAULT 'BLOCK',
                 created_at  TEXT,
-                UNIQUE(trade_date, client_name, buy_sell, quantity)
+                UNIQUE(ticker, trade_date, client_name, buy_sell, quantity)
             )
         """)
 
@@ -625,8 +628,8 @@ class DatabaseSetup:
             ("idx_bulk_date",          "bulk_deals",            "trade_date DESC"),
             ("idx_global_fetched",     "global_snapshots",      "fetched_at DESC"),
             ("idx_social_created",     "social_posts",          "created_at DESC"),
-            ("idx_sh_quarter",         "shareholding_pattern",  "quarter DESC"),
-            ("idx_bd_date",            "insider_block_deals",   "trade_date DESC"),
+            ("idx_sh_quarter",         "shareholding_pattern",  "ticker, quarter DESC"),
+            ("idx_bd_date",            "insider_block_deals",   "ticker, trade_date DESC"),
             ("idx_alt_fetched",        "alt_trends",            "fetched_at DESC"),
             ("idx_regime_detected",    "regime_snapshots",      "detected_at DESC"),
             ("idx_open_status",        "open_trades",           "status"),

@@ -159,8 +159,6 @@ class MultiBankOrchestrator:
         # Optional components — fail gracefully if unavailable
         self.llm             = self._try_import(
             "processing.llm_analyzer", "LLMAnalyzer", db_path)
-        self.insider_fetcher = self._try_import(
-            "data.insider_fetcher", "InsiderFetcher", db_path)
         self.alt_fetcher     = self._try_import(
             "data.alternative_fetcher", "AlternativeFetcher", db_path)
 
@@ -168,17 +166,22 @@ class MultiBankOrchestrator:
         from signals.signal_engine import SignalEngine
         from data.news_fetcher     import NewsFetcher
         from data.bse_fetcher      import BSEFetcher
+        from data.insider_fetcher  import InsiderFetcher
 
         self.engines:         Dict[str, SignalEngine]   = {}
         self.news_fetchers:   Dict[str, NewsFetcher]    = {}
         self.bse_fetchers:    Dict[str, BSEFetcher]     = {}
         self.options_fetchers: Dict[str, OptionsFetcher] = {}
+        # Per-bank insider fetchers — shareholding + block deals are now
+        # ticker-scoped (no more HDFC-only proxy). Weekly refresh loops these.
+        self.insider_fetchers: Dict[str, InsiderFetcher] = {}
 
         for t in tickers:
             self.engines[t]         = SignalEngine(t, capital, db_path)
             self.news_fetchers[t]   = NewsFetcher(db_path=db_path, ticker=t)
             self.bse_fetchers[t]    = BSEFetcher(db_path=db_path, ticker=t)
             self.options_fetchers[t]= OptionsFetcher(db_path=db_path, ticker=t)
+            self.insider_fetchers[t]= InsiderFetcher(db_path=db_path, ticker=t)
 
         # ── Alert dedup state ─────────────────────────────────────────────────
         # Per-ticker, per-category: { ticker: { category: (direction, confidence) } }
@@ -1206,8 +1209,8 @@ class MultiBankOrchestrator:
         """
         logger.info("── Weekly data refresh (Sunday 06:00) ──────────────────")
 
-        if self.insider_fetcher:
-            self._safe("insider_refresh", self.insider_fetcher.fetch_all)
+        for t, ins_fetcher in self.insider_fetchers.items():
+            self._safe(f"insider_refresh[{t}]", ins_fetcher.fetch_all)
 
         if self.alt_fetcher:
             self._safe("alt_data_refresh", self.alt_fetcher.fetch_all)
