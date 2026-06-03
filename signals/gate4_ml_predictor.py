@@ -134,12 +134,19 @@ class Gate4MLPredictor:
     def check(
         self,
         feature_vector: Dict,
+        regime_trade_long:  bool = True,
+        regime_trade_short: bool = True,
     ) -> Tuple[bool, Dict]:
         """
         Run all 3 ML models and check alignment.
 
         Args:
             feature_vector: output of FeatureBuilder.build_all()
+            regime_trade_long/short: which directions the current regime permits.
+                A model vote AGAINST the regime (e.g. the LONG-biased positional
+                model voting LONG in a BEAR) is noise — it must not count as a
+                conflicting vote that drags a regime-aligned signal to Grade F
+                (EDGE-2). Defaults True/True = regime-blind (back-compat).
 
         Returns:
             (passed: bool, details: Dict)
@@ -185,11 +192,14 @@ class Gate4MLPredictor:
             pos_pred = self._positional_fallback.predict(fallback_row)
             pos_pred["used_fallback"] = True
 
-        # Alignment
+        # Alignment — counter-regime votes are neutralised so a noise model
+        # (e.g. LONG-biased positional in a BEAR) can't veto an aligned signal.
         alignment, conf_boost, size_mult = self._calc_alignment(
             pos_pred["signal"],
             swing_pred["signal"],
             intra_pred["signal"],
+            regime_trade_long=regime_trade_long,
+            regime_trade_short=regime_trade_short,
         )
 
         # Boosted confidences (per-category — used downstream in Gate 6).
@@ -250,6 +260,8 @@ class Gate4MLPredictor:
         pos_sig: str,
         sw_sig:  str,
         in_sig:  str,
+        regime_trade_long:  bool = True,
+        regime_trade_short: bool = True,
     ) -> Tuple[str, float, float]:
         """
         Compute alignment grade, confidence boost, and size multiplier.
@@ -270,6 +282,16 @@ class Gate4MLPredictor:
         Hard penalty (-0.20) to both. Only very high confidence (>0.80)
         models survive F-grade and pass Gate 6.
         """
+        # EDGE-2: a model vote against what the regime permits is noise — treat
+        # it as FLAT for GRADING so it neither earns an agreement boost nor
+        # triggers a 1-vs-1 (F) / 2-vs-1 (B-) conflict penalty against an aligned
+        # signal. The per-category direction/confidence are untouched downstream.
+        def _regime_ok(sig: str) -> str:
+            if sig == "LONG"  and not regime_trade_long:  return "FLAT"
+            if sig == "SHORT" and not regime_trade_short: return "FLAT"
+            return sig
+        pos_sig, sw_sig, in_sig = _regime_ok(pos_sig), _regime_ok(sw_sig), _regime_ok(in_sig)
+
         signals  = [pos_sig, sw_sig, in_sig]
         non_flat = [s for s in signals if s != "FLAT"]
 

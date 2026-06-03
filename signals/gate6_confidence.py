@@ -49,6 +49,23 @@ class Gate6Confidence:
     # same +0.15pp total threshold cap as the situational boosts.
     PROVISIONAL_EDGE_PREMIUM = {"swing": 0.03, "positional": 0.05, "intraday": 0.0}
 
+    # ── Expectancy acceptance path (EDGE-1, 2026-06-03) ──────────────────────
+    # A 20yr trader trades positive EXPECTED VALUE, not certainty. A clean setup
+    # (Gate-5 Grade A/B geometry) at fair odds (>=2:1 reward:risk) with the model
+    # at least leaning the right way is +EV even below the P(win) threshold:
+    #   EV(R) = conf*reward_risk - (1-conf)   >0 well below 60% when rr>=2.
+    # This lets the bread-and-butter setups through instead of only the rare
+    # high-conviction tail — the weak-AUC swing/positional models (calibrated
+    # conf clusters near 0.50) otherwise almost never clear the P(win) bar, so
+    # paper-trading never collects the data needed to validate them.
+    # Bounded: needs clean geometry AND fair odds AND conf within reach of the
+    # (already regime/VIX-adjusted) threshold. Sizing is unchanged — Gate 5's
+    # grade multiplier already shrinks Grade-B / weaker entries. Tune via funnel.
+    EXPECTANCY_CONF_FLOOR = 0.50   # model must lean the chosen direction
+    EXPECTANCY_MIN_RR     = 2.0    # reward:risk at least 2:1
+    EXPECTANCY_MAX_GAP    = 0.10   # conf no more than 10pp below threshold
+    EXPECTANCY_GRADES     = ("A", "B")
+
     MIN_ALIGNMENT = {
         "SMALL":   {"A+"},          # strictest — only best signals
         "GROWING": {"A+", "A"},
@@ -64,6 +81,8 @@ class Gate6Confidence:
         model_type:          str   = "swing",
         skip_alignment:      bool  = False,
         data_quality_boost:  float = 0.0,
+        entry_quality:       str   = "C",
+        reward_risk:         float = 0.0,
     ) -> Tuple[bool, Dict]:
         """
         Final confidence and capital mode gate.
@@ -147,26 +166,47 @@ class Gate6Confidence:
         # Data-quality boost — DEGRADED feature vectors need stronger conviction.
         if data_quality_boost > 0:
             threshold = min(0.95, threshold + data_quality_boost)
+        # ── Expectancy override (EDGE-1) ──────────────────────────
+        # Below the P(win) bar, a clean setup at fair odds is still +EV. Accept
+        # iff geometry is A/B, R:R>=2, the model leans the right way (>=floor),
+        # and conf is within reach of the threshold.
+        expectancy_pass = False
+        expected_R      = None
         if primary_conf < threshold:
-            return False, {
-                "gate":        6,
-                "passed":      False,
-                "reason":      (
-                    f"Confidence {primary_conf:.0%} < "
-                    f"{threshold:.0%} threshold "
-                    f"({capital_mode} {model_type} mode"
-                    # G6-5: the boost stacks counter-regime/HIGH_VOL/instability/
-                    # stale-data/DQ — show the magnitude, don't falsely call it "DQ".
-                    f"{f', +{data_quality_boost:.0%} thr-adj' if data_quality_boost > 0 else ''}"
-                    f"{f', +{edge_premium:.0%} edge-premium' if edge_premium > 0 else ''}"
-                    f"{f', +{(_vix_boost[0] if india_vix>25 else _vix_boost[1]):.0%} VIX' if india_vix > 20 else ''})"
-                ),
-                "confidence":  primary_conf,
-                "threshold":   threshold,
-                "capital_mode":capital_mode,
-                "data_quality_boost": data_quality_boost,
-                "edge_premium": edge_premium,
-            }
+            expectancy_pass = (
+                primary_conf >= self.EXPECTANCY_CONF_FLOOR
+                and entry_quality in self.EXPECTANCY_GRADES
+                and reward_risk  >= self.EXPECTANCY_MIN_RR
+                and primary_conf >= threshold - self.EXPECTANCY_MAX_GAP
+            )
+            if expectancy_pass:
+                expected_R = round(primary_conf * reward_risk - (1 - primary_conf), 3)
+                logger.info(
+                    f"Gate 6 EXPECTANCY pass: conf {primary_conf:.0%} < thr "
+                    f"{threshold:.0%} but Grade {entry_quality} @ {reward_risk:.1f}:1 "
+                    f"→ +{expected_R}R expected ({model_type})"
+                )
+            else:
+                return False, {
+                    "gate":        6,
+                    "passed":      False,
+                    "reason":      (
+                        f"Confidence {primary_conf:.0%} < "
+                        f"{threshold:.0%} threshold "
+                        f"({capital_mode} {model_type} mode"
+                        # G6-5: the boost stacks counter-regime/HIGH_VOL/instability/
+                        # stale-data/DQ — show the magnitude, don't falsely call it "DQ".
+                        f"{f', +{data_quality_boost:.0%} thr-adj' if data_quality_boost > 0 else ''}"
+                        f"{f', +{edge_premium:.0%} edge-premium' if edge_premium > 0 else ''}"
+                        f"{f', +{(_vix_boost[0] if india_vix>25 else _vix_boost[1]):.0%} VIX' if india_vix > 20 else ''}"
+                        f"; no expectancy override: Grade {entry_quality} @ {reward_risk:.1f}:1)"
+                    ),
+                    "confidence":  primary_conf,
+                    "threshold":   threshold,
+                    "capital_mode":capital_mode,
+                    "data_quality_boost": data_quality_boost,
+                    "edge_premium": edge_premium,
+                }
 
         # ── Final size multiplier (all gates combined) ─────────────
         final_mult = float(risk_context.get("final_size_mult", 1.0))
@@ -183,4 +223,6 @@ class Gate6Confidence:
             "final_size_mult":final_mult,
             "data_quality_boost": data_quality_boost,
             "edge_premium":  edge_premium,
+            "expectancy_pass": expectancy_pass,
+            "expected_R":    expected_R,
         }

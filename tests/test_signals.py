@@ -303,6 +303,65 @@ class TestGate6Confidence(unittest.TestCase):
         )
         self.assertTrue(passed)
 
+    # ── EDGE-1: expectancy override ──────────────────────────────────────
+    def test_expectancy_passes_clean_setup_below_threshold(self):
+        # swing thr 0.60 + 0.03 premium = 0.63; conf 0.55 < 0.63 but Grade A @ 2.5:1
+        passed, ctx = self.gate.check(
+            primary_conf=0.55, alignment="C", capital_mode="FULL",
+            risk_context=self._risk_ok(), model_type="swing", skip_alignment=True,
+            entry_quality="A", reward_risk=2.5,
+        )
+        self.assertTrue(passed)
+        self.assertTrue(ctx["expectancy_pass"])
+        self.assertGreater(ctx["expected_R"], 0)
+
+    def test_expectancy_rejects_weak_geometry(self):
+        passed, _ = self.gate.check(
+            primary_conf=0.55, alignment="C", capital_mode="FULL",
+            risk_context=self._risk_ok(), model_type="swing", skip_alignment=True,
+            entry_quality="C", reward_risk=2.5,   # Grade C → no override
+        )
+        self.assertFalse(passed)
+
+    def test_expectancy_rejects_below_floor_and_poor_rr(self):
+        # below conf floor (0.50) even with great R:R
+        p1, _ = self.gate.check(
+            primary_conf=0.46, alignment="C", capital_mode="FULL",
+            risk_context=self._risk_ok(), model_type="swing", skip_alignment=True,
+            entry_quality="A", reward_risk=4.0)
+        # fair conf but R:R below 2:1
+        p2, _ = self.gate.check(
+            primary_conf=0.55, alignment="C", capital_mode="FULL",
+            risk_context=self._risk_ok(), model_type="swing", skip_alignment=True,
+            entry_quality="A", reward_risk=1.2)
+        self.assertFalse(p1)
+        self.assertFalse(p2)
+
+
+class TestGate4RegimeAlignment(unittest.TestCase):
+    """EDGE-2: a counter-regime model vote must not drag an aligned signal to F."""
+
+    def setUp(self):
+        from signals.gate4_ml_predictor import Gate4MLPredictor
+        self.g4 = Gate4MLPredictor.__new__(Gate4MLPredictor)  # no model load
+
+    def test_counter_regime_long_not_penalised_in_bear(self):
+        # BEAR: pos LONG (counter, noise) + intra SHORT (aligned) + swing FLAT.
+        blind = self.g4._calc_alignment("LONG", "FLAT", "SHORT")
+        aware = self.g4._calc_alignment("LONG", "FLAT", "SHORT",
+                                        regime_trade_long=False, regime_trade_short=True)
+        self.assertEqual(blind[0], "F")     # regime-blind: 1v1 conflict → F (−20pp)
+        self.assertEqual(aware[0], "C")     # regime-aware: LONG dropped → lone SHORT
+        self.assertLess(blind[1], 0)        # F penalises
+        self.assertGreaterEqual(aware[1], 0)
+
+    def test_aligned_agreement_unchanged(self):
+        # Both SHORT in a BEAR — genuine agreement must still grade well.
+        grade, boost, _ = self.g4._calc_alignment(
+            "SHORT", "SHORT", "FLAT", regime_trade_long=False, regime_trade_short=True)
+        self.assertIn(grade, ("A", "B"))
+        self.assertGreater(boost, 0)
+
 
 class TestTimeframeAlignment(unittest.TestCase):
 

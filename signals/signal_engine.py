@@ -278,7 +278,13 @@ class SignalEngine:
             )
 
         # ── Gate 4: ML models ──────────────────────────────────────
-        g4_pass, g4_ctx = self.gate4.check(feature_vector)
+        # Pass regime direction so counter-regime model votes (noise) don't drag
+        # an aligned signal to Grade F (EDGE-2).
+        g4_pass, g4_ctx = self.gate4.check(
+            feature_vector,
+            regime_trade_long=bool(regime_result.get("trade_long",  True)),
+            regime_trade_short=bool(regime_result.get("trade_short", True)),
+        )
         gate_results["gate4"] = g4_ctx
         self._gate4_cache = g4_ctx if g4_pass else self._gate4_cache
 
@@ -560,6 +566,10 @@ class SignalEngine:
                 model_type=cat,
                 skip_alignment=True,
                 data_quality_boost=cat_boost,
+                # EDGE-1: feed Gate 5 geometry so a clean A/B setup at >=2:1 R:R
+                # can pass on positive expectancy even below the P(win) threshold.
+                entry_quality=g5_ctx.get("entry_quality", "C"),
+                reward_risk=float(g5_ctx.get("reward_risk", 0.0)),
             )
 
             passed_all = bool(g5_pass and g6_pass)
