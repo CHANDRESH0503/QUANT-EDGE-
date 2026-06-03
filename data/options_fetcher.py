@@ -444,23 +444,26 @@ class OptionsFetcher:
     # ─────────────────────────────────────────────────────────────
 
     def _fetch_options_chain(self) -> Dict:
-        """Fetch live options chain from NSE for this ticker's NSE symbol."""
+        """
+        Fetch live options chain from NSE for this ticker's NSE symbol.
+
+        option-chain-equities is one of NSE's most cookie-protected endpoints —
+        it 401s once the boot-time prime lapses. Route through the shared
+        re-prime+retry helper (data/nse_session.py) so a long-running process
+        recovers instead of silently returning empty every cycle.
+        """
+        from data.nse_session import nse_get_json
         url = (
             f"https://www.nseindia.com/api/option-chain-equities"
             f"?symbol={self.nse_symbol}"
         )
-        try:
-            response = self._session.get(
-                url, headers=self.NSE_HEADERS, timeout=15
-            )
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.warning(f"[{self.ticker}] NSE options chain returned {response.status_code}")
-                return {}
-        except Exception as e:
-            logger.error(f"[{self.ticker}] options chain fetch failed: {e}")
-            return {}
+        data = nse_get_json(
+            self._session, url,
+            referer="https://www.nseindia.com/option-chain",
+            page_url="https://www.nseindia.com/option-chain",
+            timeout=15,
+        )
+        return data if isinstance(data, dict) else {}
 
     def _save_snapshot(self, data: Dict) -> None:
         """Save options snapshot to DB — always tagged with ticker."""

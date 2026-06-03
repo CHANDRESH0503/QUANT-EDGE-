@@ -100,6 +100,14 @@ class BSEFetcher:
                 return 0
 
             data = response.json()
+            # BSE intermittently returns a bare JSON string (error body) instead
+            # of the expected object — guard so `.get` never hits a str and spams
+            # the log with "'str' object has no attribute 'get'" every cycle.
+            if not isinstance(data, dict):
+                logger.warning(
+                    f"BSE returned non-dict payload ({type(data).__name__}) — skipping"
+                )
+                return 0
             announcements = data.get("Table", [])
             return self._save_announcements(announcements, "bse")
 

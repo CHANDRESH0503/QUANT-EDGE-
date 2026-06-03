@@ -110,16 +110,16 @@ class InsiderFetcher:
         NSE publishes this within 21 days of quarter end.
         """
         try:
+            from data.nse_session import nse_get_json
             url = (
                 f"https://www.nseindia.com/api/corporate-share-holdings-master"
                 f"?symbol={HDFC_NSE_SYM}"
             )
-            resp = self._session.get(url, headers=self.NSE_HEADERS, timeout=10)
-            if resp.status_code != 200:
+            quote_page = f"https://www.nseindia.com/get-quotes/equity?symbol={HDFC_NSE_SYM}"
+            data = nse_get_json(self._session, url, referer=quote_page, page_url=quote_page)
+            if not isinstance(data, dict):
                 return
-
-            data  = resp.json()
-            rows  = data.get("data", [])
+            rows = data.get("data", [])
             if not rows:
                 return
 
@@ -145,12 +145,15 @@ class InsiderFetcher:
         """
         try:
             # Block deals (separate from bulk deals — even larger)
+            from data.nse_session import nse_get_json
             url = "https://www.nseindia.com/api/block-deal"
-            resp = self._session.get(url, headers=self.NSE_HEADERS, timeout=10)
-            if resp.status_code != 200:
+            block_page = "https://www.nseindia.com/market-data/block-deal-watch"
+            data = nse_get_json(self._session, url, referer=block_page, page_url=block_page)
+            # NSE returns either a bare list or {"data": [...]} depending on endpoint
+            if isinstance(data, dict):
+                data = data.get("data", [])
+            if not isinstance(data, list):
                 return
-
-            data = resp.json()
             hdfc_deals = [
                 d for d in data
                 if HDFC_NSE_SYM in str(d.get("symbol", "")).upper()

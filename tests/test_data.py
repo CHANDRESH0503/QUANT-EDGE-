@@ -266,5 +266,104 @@ class TestQueriesContract(unittest.TestCase):
         self.assertEqual(stats["closed_trades"], 5)
 
 
+class TestDataQualityExclusions(unittest.TestCase):
+    """
+    Guards the data-quality miss% denominator. Date-derived, portfolio-state
+    and meta features are legitimately 0 (Wednesday, fresh book, undecided
+    timeframes) and must NOT count as a missing data source — otherwise an
+    otherwise-healthy build is wrongly tagged DEGRADED and a blanket +5pp
+    Gate 6 threshold suppresses valid signals every cycle.
+    """
+
+    def test_healthy_zero_features_excluded(self):
+        from features.feature_builder import FeatureBuilder
+        for name in ("day_of_week_norm", "month_seasonality", "holiday_proximity",
+                     "portfolio_heat", "monthly_pnl_norm", "monthly_dd_pct",
+                     "signal_streak_norm", "losing_streak_norm",
+                     "tf_alignment_score", "direction_consensus"):
+            self.assertTrue(FeatureBuilder._is_dq_flag(name),
+                            f"{name} should be excluded from miss% denominator")
+
+    def test_external_source_features_still_counted(self):
+        # Options / flow / sentiment magnitudes MUST still count — a 0 there is
+        # a genuine data-source outage we want to surface as DEGRADED.
+        from features.feature_builder import FeatureBuilder
+        for name in ("pcr_norm", "dii_3d_norm", "iv_percentile_norm",
+                     "finbert_score_24h", "rsi_14"):
+            self.assertFalse(FeatureBuilder._is_dq_flag(name),
+                             f"{name} is externally sourced and must stay counted")
+
+
+class TestBSEFetcherRobustness(unittest.TestCase):
+    """BSE intermittently returns a bare JSON string; the fetcher must not crash."""
+
+    def test_non_dict_payload_returns_zero(self):
+        from data.bse_fetcher import BSEFetcher
+
+        class _Resp:
+            status_code = 200
+            def json(self_inner):
+                return "Error: no data"   # str, not dict
+
+        f = BSEFetcher.__new__(BSEFetcher)          # skip __init__/network
+        f._bse_code = "500180"
+        f.BSE_HEADERS = {}
+
+        class _Sess:
+            def get(self_inner, *a, **k):
+                return _Resp()
+        f._session = _Sess()
+
+        self.assertEqual(f.fetch_bse_announcements(), 0)
+
+
+class TestNSESessionRetry(unittest.TestCase):
+    """
+    nse_get_json must recover the strict NSE endpoints (option-chain / insider)
+    by re-priming + retrying once on 401/403, and fail safe (None) otherwise —
+    so a stale boot cookie no longer leaves options/insider tables empty.
+    """
+
+    class _Resp:
+        def __init__(self, code, body):
+            self.status_code, self._b = code, body
+        def json(self):
+            if isinstance(self._b, Exception):
+                raise self._b
+            return self._b
+
+    class _FakeSession:
+        def __init__(self, script):
+            self.script, self.primes = list(script), 0
+        def get(self, url, **k):
+            if "/api/" not in url:          # priming hits the HTML pages
+                self.primes += 1
+                return TestNSESessionRetry._Resp(200, {})
+            return self.script.pop(0)
+
+    def _call(self, script, url="https://www.nseindia.com/api/option-chain-equities?symbol=X"):
+        from data.nse_session import nse_get_json
+        s = self._FakeSession(script)
+        return nse_get_json(s, url, referer="r", page_url="p"), s
+
+    def test_200_first_try(self):
+        out, s = self._call([self._Resp(200, {"records": {"data": [1, 2, 3]}})])
+        self.assertEqual(len(out["records"]["data"]), 3)
+        self.assertEqual(s.primes, 0)   # no needless re-prime on success
+
+    def test_401_then_retry_succeeds(self):
+        out, s = self._call([self._Resp(401, None), self._Resp(200, {"ok": 1})])
+        self.assertEqual(out, {"ok": 1})
+        self.assertGreater(s.primes, 0)  # re-primed before retry
+
+    def test_persistent_401_returns_none(self):
+        out, _ = self._call([self._Resp(401, None), self._Resp(401, None)])
+        self.assertIsNone(out)
+
+    def test_non_json_returns_none(self):
+        out, _ = self._call([self._Resp(200, ValueError("no json"))])
+        self.assertIsNone(out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

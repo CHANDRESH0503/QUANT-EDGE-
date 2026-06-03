@@ -1111,6 +1111,17 @@ class FeatureBuilder:
         "promoter_change", "pre_earnings_drift", "consecutive_loss_halt",
         "earnings_risk_flag", "macro_stale", "near_breakout",
         "trade_long", "trade_short",
+        # Date-derived centred features: legitimately 0 at the neutral point
+        # (e.g. day_of_week_norm = (dow-2)/2 = 0 on a Wednesday). Not externally
+        # sourced — a 0 here can never indicate a data-source outage.
+        "day_of_week_norm", "month_seasonality", "holiday_proximity",
+        # Portfolio/trade-state: healthy-zero with no open risk / fresh book
+        # (paper trading just started). Same family as the risk fields above.
+        "portfolio_heat", "monthly_pnl_norm", "monthly_dd_pct",
+        "signal_streak_norm", "losing_streak_norm",
+        # Model-state meta: neutral = 0 when timeframes are undecided. Derived
+        # from the models, not from any external feed.
+        "tf_alignment_score", "direction_consensus",
     })
 
     @classmethod
