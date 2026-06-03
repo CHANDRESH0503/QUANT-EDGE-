@@ -22,6 +22,7 @@ models/saved/finbert_cache/
 models/evaluation/*.json
 
 # Logs — runtime data
+logs
 logs/*.csv
 logs/*.txt
 logs/*.log
