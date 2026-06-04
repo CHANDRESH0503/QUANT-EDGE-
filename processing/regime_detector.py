@@ -202,77 +202,27 @@ class RegimeDetector:
             logger.error(f"HMM training failed: {e}")
             return False
 
-    def detect(self, df: pd.DataFrame) -> Dict:
+    def detect(self, df: pd.DataFrame, tech_df: Optional[pd.DataFrame] = None) -> Dict:
         """
         Detect current market regime from recent OHLCV data.
         Called at the start of every signal generation cycle.
 
-        Returns full regime context including:
-        - regime name and rules
-        - stability score (how long in current regime)
-        - probability of each regime
-        - trading rules for current regime
+        Regime is classified from ADX + EMA spread via the SAME
+        `classify_regime_row` the ML models are trained on (audit GATE1-1).
+        This unifies the gating regime with the model's own regime feature and
+        with the actual price action — the HMM previously used here over-called
+        BEAR_TRENDING (100% stable) on choppy tapes and disagreed with the
+        model on ~2/5 banks, defeating Gate 1's CHOPPY-block purpose. The HMM
+        methods are retained for offline/back-compat use but no longer gate.
+
+        Pass `tech_df` (TechnicalProcessor output) so Gate 1 reads the EXACT
+        same `adx`/`ema_spread` the feature vector uses; otherwise they are
+        computed from `df`.
+
+        Returns full regime context: regime name, stability, per-regime probs,
+        and the trading rules for the current regime.
         """
-        if self._model is not None and HMM_AVAILABLE:
-            result = self._hmm_detect(df)
-        else:
-            result = self._rule_based_detect(df)
-
-        # EMA + 200d override for borderline CHOPPY detections.
-        # The HMM can stay locked in CHOPPY even when price is clearly trending
-        # — especially for banks like INDUSINDBK that crashed then stabilised:
-        # the HDFCBANK-trained scaler misscales their features into the CHOPPY
-        # state.  We rescue with two checks:
-        #   1. EMA20 vs EMA50 spread > ±1.5% (was ±2%, too loose for post-crash)
-        #   2. 200-day EMA position: price < 200d EMA by ≥10% → BEAR fallback
-        if result["regime"] == "CHOPPY_SIDEWAYS" and len(df) >= 50:
-            close   = df["Close"]
-            ema20   = float(close.ewm(span=20).mean().iloc[-1])
-            ema50   = float(close.ewm(span=50).mean().iloc[-1])
-            spread  = (ema20 - ema50) / ema50   # positive = bullish
-
-            # 200-day EMA rescue for banks in a deep downtrend post-crash
-            ema200_val = None
-            if len(df) >= 200:
-                ema200_val = float(close.ewm(span=200).mean().iloc[-1])
-                price      = float(close.iloc[-1])
-                below_200d = (ema200_val - price) / ema200_val   # >0 means below
-                if below_200d >= 0.10:     # price ≥10% below 200-day EMA → BEAR
-                    result = self._build_result(
-                        "BEAR_TRENDING",
-                        min(result["stability"], 0.60),
-                        {**result.get("probs", self._equal_probs()),
-                         "BEAR_TRENDING": 0.60, "CHOPPY_SIDEWAYS": 0.25},
-                    )
-                    logger.info(
-                        f"[{self.ticker}] 200d override: CHOPPY→BEAR_TRENDING "
-                        f"(price {below_200d:.1%} below 200d EMA)"
-                    )
-
-            # EMA20/50 spread rescue (threshold lowered 2%→1.5%)
-            if result["regime"] == "CHOPPY_SIDEWAYS":
-                if spread < -0.015:       # below 50-day EMA → mild BEAR
-                    result = self._build_result(
-                        "BEAR_TRENDING",
-                        min(result["stability"], 0.65),
-                        {**result.get("probs", self._equal_probs()),
-                         "BEAR_TRENDING": 0.55, "CHOPPY_SIDEWAYS": 0.30},
-                    )
-                    logger.info(
-                        f"[{self.ticker}] EMA override: CHOPPY→BEAR_TRENDING "
-                        f"(spread={spread:.2%}, stability capped at 65%)"
-                    )
-                elif spread > 0.015:      # above 50-day EMA → mild BULL
-                    result = self._build_result(
-                        "BULL_TRENDING",
-                        min(result["stability"], 0.65),
-                        {**result.get("probs", self._equal_probs()),
-                         "BULL_TRENDING": 0.55, "CHOPPY_SIDEWAYS": 0.30},
-                    )
-                    logger.info(
-                        f"[{self.ticker}] EMA override: CHOPPY→BULL_TRENDING "
-                        f"(spread={spread:.2%}, stability capped at 65%)"
-                    )
+        result = self._classify_detect(df, tech_df)
 
         # ── Anti-whipsaw persistence ──────────────────────────────
         # Smooth the raw per-cycle classification: a new regime must be
@@ -445,7 +395,83 @@ class RegimeDetector:
                 for r in self.REGIME_NAMES.values()}
 
     # ─────────────────────────────────────────────────────────────
-    # HMM DETECTION
+    # ADX/EMA CLASSIFIER DETECTION (GATE1-1 — the gating authority)
+    # ─────────────────────────────────────────────────────────────
+
+    def _classify_detect(self, df: pd.DataFrame,
+                         tech_df: Optional[pd.DataFrame] = None) -> Dict:
+        """
+        Classify the current regime with the SHARED `classify_regime_row`
+        thresholds (ADX + EMA spread) — identical to the ML feature regime.
+
+        Stability = fraction of the last 10 bars in the current regime (same
+        rolling definition as `_compute_bulk_regime_features`), so a genuinely
+        choppy tape reports low stability instead of a false 100%.
+        """
+        if len(df) < 50:
+            # Not enough history to compute ADX(14)/EMA(50) reliably → no view.
+            return self._build_result("CHOPPY_SIDEWAYS", 0.5, self._equal_probs())
+
+        # Single source of truth for thresholds (Rule #12). Lazy import avoids
+        # the feature_builder ↔ regime_detector circular import.
+        from features.feature_builder import (
+            _REGIME_ADX_TREND_MIN, _REGIME_ADX_HVOL_MIN,
+            _REGIME_EMA_TREND_MIN, _REGIME_EMA_OVERRIDE, _REGIME_HVOL_R5_MIN,
+        )
+
+        adx_s, esp_s, ret5_s = self._regime_indicator_series(df, tech_df)
+        adx  = adx_s.to_numpy(dtype=float)
+        esp  = esp_s.to_numpy(dtype=float)
+        r5   = np.abs(ret5_s.to_numpy(dtype=float))
+
+        bear = ((adx > _REGIME_ADX_TREND_MIN) & (esp < -_REGIME_EMA_TREND_MIN)) | (esp < -_REGIME_EMA_OVERRIDE)
+        bull = ((adx > _REGIME_ADX_TREND_MIN) & (esp >  _REGIME_EMA_TREND_MIN)) | (esp >  _REGIME_EMA_OVERRIDE)
+        hvol = (adx > _REGIME_ADX_HVOL_MIN) & (r5 > _REGIME_HVOL_R5_MIN)
+
+        # Single regime name per bar. HIGH_VOL takes precedence (de-risk: a
+        # violent move overrides trend direction); then BEAR/BULL (mutually
+        # exclusive — EMA spread can't be both > +1% and < −1%); else CHOPPY.
+        names = np.where(hvol, "HIGH_VOLATILITY",
+                 np.where(bear, "BEAR_TRENDING",
+                 np.where(bull, "BULL_TRENDING", "CHOPPY_SIDEWAYS")))
+
+        raw_regime = str(names[-1])
+        window     = names[-10:]
+        stability  = float((window == raw_regime).sum() / len(window))
+        return self._build_result(
+            raw_regime, stability,
+            self._regime_probs_for(raw_regime, max(stability, 0.25)),
+        )
+
+    def _regime_indicator_series(self, df: pd.DataFrame,
+                                 tech_df: Optional[pd.DataFrame]):
+        """
+        (adx, ema_spread, returns_5d) Series aligned to df. Prefers the
+        TechnicalProcessor columns (so Gate 1 == the ML feature inputs); falls
+        back to computing them from df when tech_df is unavailable.
+        """
+        ret5 = df["Close"].pct_change(5)
+        if (tech_df is not None and not tech_df.empty
+                and "adx" in tech_df.columns and "ema_spread" in tech_df.columns):
+            return (tech_df["adx"].fillna(0.0),
+                    tech_df["ema_spread"].fillna(0.0),
+                    ret5.reindex(tech_df.index).fillna(0.0))
+        # Fallback: standard ADX(14) + EMA20/50 spread from df.
+        c, h, l = df["Close"], df["High"], df["Low"]
+        ema_spread = (c.ewm(span=20).mean() - c.ewm(span=50).mean()) / c.ewm(span=50).mean()
+        up, dn = h.diff(), -l.diff()
+        plus  = ((up > dn) & (up > 0)) * up
+        minus = ((dn > up) & (dn > 0)) * dn
+        tr  = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(14).mean()
+        pdi = 100 * plus.rolling(14).mean() / atr
+        mdi = 100 * minus.rolling(14).mean() / atr
+        dx  = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
+        adx = dx.rolling(14).mean()
+        return adx.fillna(0.0), ema_spread.fillna(0.0), ret5.fillna(0.0)
+
+    # ─────────────────────────────────────────────────────────────
+    # HMM DETECTION (retained for offline/back-compat — does NOT gate)
     # ─────────────────────────────────────────────────────────────
 
     def _hmm_detect(self, df: pd.DataFrame) -> Dict:

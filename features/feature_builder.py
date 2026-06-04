@@ -612,7 +612,9 @@ class FeatureBuilder:
             max_call_oi_strike=float(opts_raw.get("max_call_oi_strike", 0)),
             max_put_oi_strike=float(opts_raw.get("max_put_oi_strike",  0)),
         )
-        regime_result = self.regime.detect(df_daily)
+        # Pass tech_df so Gate 1's regime uses the EXACT same adx/ema_spread the
+        # ML feature vector does — unified ADX/EMA classifier end-to-end (GATE1-1).
+        regime_result = self.regime.detect(df_daily, tech_df=tech_df)
         regime_feats  = self.regime.get_regime_features_for_ml()
         regime_trend  = self.regime.get_recent_regime_trend()
 
