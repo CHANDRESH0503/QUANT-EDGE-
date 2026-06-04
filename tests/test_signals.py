@@ -14,6 +14,7 @@ from signals.gate2_rule_filter  import Gate2RuleFilter
 from signals.gate5_sr_validator import Gate5SRValidator
 from signals.gate6_confidence   import Gate6Confidence
 from signals.timeframe_alignment import TimeframeAlignment
+from signals.signal_stabilizer   import SignalStabilizer
 
 
 class TestGate1Regime(unittest.TestCase):
@@ -401,6 +402,48 @@ class TestTimeframeAlignment(unittest.TestCase):
     def test_single_non_flat_is_b_or_c(self):
         result = self.aligner.compute("LONG", "FLAT", "FLAT")
         self.assertIn(result["grade"], ["B", "C"])
+
+
+class TestSignalStabilizer(unittest.TestCase):
+    """STAB-2 anti-flicker commit layer."""
+
+    def setUp(self):
+        self.s = SignalStabilizer()
+
+    @staticmethod
+    def _p(long=0.0, flat=0.0, short=0.0):
+        return {"prob_long": long, "prob_flat": flat, "prob_short": short}
+
+    def test_deadband_marginal_long_held_flat(self):
+        # LONG 0.48 vs FLAT 0.51 → argmax is FLAT anyway; and even a 3pp lead
+        # over flat is below the dead-band → stays FLAT.
+        r = self.s.commit("swing", "LONG", self._p(long=0.46, flat=0.44, short=0.10))
+        self.assertEqual(r["decisive"], "FLAT")
+        self.assertEqual(r["committed"], "FLAT")
+
+    def test_decisive_long_needs_confirmation_swing(self):
+        # swing confirms over 2 cycles: first cycle holds FLAT, second commits.
+        p = self._p(long=0.70, flat=0.20, short=0.10)
+        r1 = self.s.commit("swing", "LONG", p)
+        self.assertEqual(r1["committed"], "FLAT")          # 1/2 — holding
+        r2 = self.s.commit("swing", "LONG", p)
+        self.assertEqual(r2["committed"], "LONG")          # 2/2 — committed
+
+    def test_intraday_commits_in_one_cycle(self):
+        r = self.s.commit("intraday", "SHORT", self._p(short=0.80, flat=0.15, long=0.05))
+        self.assertEqual(r["committed"], "SHORT")          # confirm=1 → immediate
+
+    def test_fast_derisk_to_flat_is_immediate(self):
+        p = self._p(long=0.80, flat=0.10, short=0.10)
+        self.s.commit("intraday", "LONG", p)               # committed LONG
+        r = self.s.commit("intraday", "FLAT", self._p(long=0.30, flat=0.45, short=0.25))
+        self.assertEqual(r["committed"], "FLAT")           # dropped immediately
+        self.assertTrue(r["intervened"] is False)          # raw was already FLAT
+
+    def test_reversal_exits_to_flat_first(self):
+        self.s.commit("intraday", "LONG", self._p(long=0.80, flat=0.10, short=0.10))
+        r = self.s.commit("intraday", "SHORT", self._p(short=0.80, flat=0.10, long=0.10))
+        self.assertEqual(r["committed"], "FLAT")           # never flips LONG→SHORT directly
 
 
 if __name__ == "__main__":

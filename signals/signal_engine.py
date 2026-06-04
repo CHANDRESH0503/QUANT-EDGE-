@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 from signals.gate1_regime      import Gate1Regime
+from signals.signal_stabilizer  import SignalStabilizer
 from signals.gate2_rule_filter import Gate2RuleFilter
 from signals.gate3_universe_rank import Gate3UniverseRank
 from signals.gate4_ml_predictor import Gate4MLPredictor
@@ -92,6 +93,8 @@ class SignalEngine:
         self.gate5  = Gate5SRValidator()
         self.gate6  = Gate6Confidence()
         self.aligner= TimeframeAlignment()
+        # Anti-flicker commit layer (STAB-2) — per-bank, carries across cycles.
+        self.stabilizer = SignalStabilizer()
 
         # Processors
         self.feature_builder = FeatureBuilder(ticker, capital, db_path)
@@ -309,6 +312,24 @@ class SignalEngine:
             "intraday":   g4_ctx.get("intraday",   {}).get("signal", "FLAT"),
         }
 
+        # ── Signal commit layer (anti-flicker, STAB-2) ───────────────
+        # Dead-band marginal votes to FLAT and require confirmation to commit a
+        # NEW direction (fast to FLAT). Mirrors the regime anti-whipsaw. Raw
+        # model telemetry in g4_ctx is left untouched — only the per-category
+        # trading DECISION (cat_dir/cat_conf) is stabilised.
+        stab_reason: Dict[str, str] = {}
+        for _cat in ("swing", "positional", "intraday"):
+            _st = self.stabilizer.commit(_cat, cat_dir[_cat], g4_ctx.get(_cat, {}))
+            if _st["intervened"]:
+                stab_reason[_cat] = _st["reason"]
+                logger.info(
+                    f"[{self.ticker}] {_cat} signal stabilised: "
+                    f"raw={_st['raw']} → {_st['committed']} ({_st['reason']})"
+                )
+                cat_dir[_cat] = _st["committed"]
+                if _st["committed"] == "FLAT":
+                    cat_conf[_cat] = round(float(g4_ctx.get(_cat, {}).get("prob_flat", 0.0)), 4)
+
         reasons.append(
             f"ML: swing={cat_dir['swing']}({cat_conf['swing']:.0%}) "
             f"pos={cat_dir['positional']}({cat_conf['positional']:.0%}) "
@@ -383,13 +404,15 @@ class SignalEngine:
                 continue
 
             # ── FLAT category — no direction to validate ─────────
+            # If the stabiliser held/de-risked this category to FLAT, surface
+            # WHY (confirming / de-risk) instead of the generic "model FLAT".
             if direction == "FLAT":
                 per_category[cat] = {
                     "category":   cat,
                     "passed":     False,
                     "direction":  "FLAT",
                     "confidence": round(conf_b, 4),
-                    "reason":     "Model predicts FLAT",
+                    "reason":     stab_reason.get(cat, "Model predicts FLAT"),
                     "regime_match": None,
                     "gate5":      None,
                     "gate6":      None,
