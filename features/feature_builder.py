@@ -401,6 +401,14 @@ class FeatureBuilder:
         self.sr_engine   = SupportResistanceEngine()
         self.intermarket = IntermarketAnalyzer(db_path)
         self.regime      = RegimeDetector(db_path, ticker=ticker)
+        # Market calendar — used to drop the still-forming daily bar intraday
+        # so multi-day (swing/positional) features + regime stay stable within
+        # the session instead of drifting on the partial candle.
+        try:
+            from scheduler.market_schedule import MarketSchedule
+            self._schedule = MarketSchedule()
+        except Exception:
+            self._schedule = None
 
         # ── Data layer ─────────────────────────────────────────────
         self.price_fetcher    = PriceFetcher(ticker)
@@ -522,11 +530,18 @@ class FeatureBuilder:
             logger.error("Daily price fetch returned empty — aborting")
             return self._empty_result()
 
+        # current_price stays LIVE (full df, incl. the forming bar = now).
         current_price = float(df_daily["Close"].iloc[-1])
+
+        # Daily-derived FEATURES (swing/positional/regime) use CLOSED bars only
+        # — drops today's still-forming candle intraday so multi-day signals
+        # don't flicker on the partial bar (see _closed_daily). Intraday (5m)
+        # features below are intentionally left live.
+        df_daily_feat = self._closed_daily(df_daily)
 
         # ── STEP 2: Technical features ─────────────────────────────
         logger.info("[2/10] Technical processing")
-        tech_df      = self.technical.build_features(df_daily)
+        tech_df      = self.technical.build_features(df_daily_feat)
         tech_feats   = self.tech_feats.extract(tech_df)
 
         # atr_14 lives in tech_df (raw TechnicalProcessor output) but is not in
@@ -605,16 +620,18 @@ class FeatureBuilder:
 
         # ── STEP 9: Pattern + Anomaly + S/R + Regime + Alt ────────
         logger.info("[9/10] Pattern / anomaly / S/R / regime / alt data")
-        pattern_raw  = self.patterns.get_pattern_features(df_daily)
+        # Pattern / S/R use CLOSED bars (stable, train-consistent). Anomaly stays
+        # on the LIVE df so a genuine intraday price shock is still caught.
+        pattern_raw  = self.patterns.get_pattern_features(df_daily_feat)
         anomaly_raw  = self.anomaly.detect(df_daily)
         sr_raw       = self.sr_engine.get_sr_features(
-            df_daily,
+            df_daily_feat,
             max_call_oi_strike=float(opts_raw.get("max_call_oi_strike", 0)),
             max_put_oi_strike=float(opts_raw.get("max_put_oi_strike",  0)),
         )
         # Pass tech_df so Gate 1's regime uses the EXACT same adx/ema_spread the
         # ML feature vector does — unified ADX/EMA classifier end-to-end (GATE1-1).
-        regime_result = self.regime.detect(df_daily, tech_df=tech_df)
+        regime_result = self.regime.detect(df_daily_feat, tech_df=tech_df)
         regime_feats  = self.regime.get_regime_features_for_ml()
         regime_trend  = self.regime.get_recent_regime_trend()
 
@@ -1030,6 +1047,30 @@ class FeatureBuilder:
     # ──────────────────────────────────────────────────────────────────────────
     # INTERNAL UTILITIES
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _closed_daily(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Return `df` with the still-forming current-session bar dropped.
+
+        During market hours yfinance's last daily bar is the partial,
+        still-forming candle — its OHLC drift every cycle, so daily-derived
+        features (ADX, EMA spread, RSI, returns) and the regime move all day
+        and a multi-day signal flickers LONG↔FLAT. Multi-day timeframes should
+        decide on CLOSED bars (also what the models were trained on). Once the
+        market is closed the latest bar is complete and is KEPT, so the EOD
+        view still incorporates today. Live `current_price` is taken from the
+        full df separately, so dropping here doesn't staleten the price.
+        """
+        try:
+            if df is None or len(df) < 2 or self._schedule is None:
+                return df
+            if not self._schedule.is_market_open():
+                return df                       # last bar already complete
+            if df.index[-1].date() == self._schedule.today():
+                return df.iloc[:-1]             # drop today's forming bar
+            return df
+        except Exception:
+            return df
 
     def _compute_bulk_regime_features(self, tech_df: pd.DataFrame) -> pd.DataFrame:
         """
