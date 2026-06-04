@@ -20,62 +20,32 @@ class Gate5SRValidator:
     The S/R engine computes entry_quality from a LONG perspective only.
     Gate 5 recomputes quality for SHORT signals using the inverted distance perspective.
 
-    Grade C: reduced size (65%).
-    Grade D: reduced size (40%) + requires confidence ≥ category threshold and alignment B or better.
-             Category thresholds: positional=68%, swing=65%, intraday=62%.
-             20yr rule: longer hold duration in a bad S/R setup = needs proportionally
-             more conviction. A positional trade risks 3-4 weeks of adverse drift in a
-             Grade D setup; an intraday trade is out by end-of-day regardless.
+    GATE5-1 (momentum-aligned): the entry_quality grade is now an
+    ATR-relative *runway* signal (computed in support_resistance.py for both
+    directions) and SIZES the trade — it never vetoes it:
+        Grade A → full size · B → 0.85× · C → 0.65× · D → 0.40× (probe).
+    Grade D = entering with limited clear runway to the ATR target (a strong
+    wall is near). reward_risk is the REAL trade R:R (target 5×ATR / stop
+    2×ATR = 2.5:1), so the old hard R:R floor — which fired on a sub-ATR
+    noise ratio and blocked ~37% of genuine 2.5:1 trades — no longer
+    triggers. The conviction gate is Gate 6's category threshold downstream.
 
     SHORT near_breakout: buyers are aggressive at resistance (volume spike).
              Shorting into a potential breakout = swimming against institutional flow.
              Penalised 0.80× even when entry_quality is otherwise good.
     """
 
-    MIN_REWARD_RISK      = 2.0   # soft floor — below this: size reduced
-    RR_HARD_BLOCK        = 0.5   # hard floor — below this: signal blocked regardless of confidence.
-                                 # R:R < 0.5 means resistance is >2× closer than support for LONGs
-                                 # (or support >2× closer than resistance for SHORTs) — the S/R
-                                 # geometry makes the trade statistically losing before fees.
+    MIN_REWARD_RISK      = 2.0   # soft floor — below this: size reduced (defensive;
+                                 # prod reward_risk is the real 2.5:1 so this rarely fires)
+    RR_HARD_BLOCK        = 0.5   # defensive hard floor for malformed/degenerate R:R only.
+                                 # prod reward_risk = real trade R:R (2.5) so this never
+                                 # fires on S/R geometry (GATE5-1). Kept as an input guard.
     GRADE_SIZE_MAP  = {
         "A":  1.00,
         "B":  0.85,
         "C":  0.65,
         "D":  0.40,
     }
-
-    # Category-aware Grade D confidence threshold.
-    # Grade D = far from support (LONG) or near support (SHORT) — poor entry geometry.
-    # A positional trade holds 2–4 weeks in a Grade D setup = widest possible risk window.
-    # An intraday trade has the same poor geometry but Gate 6 already enforces 65%,
-    # making this threshold non-binding for intraday (Gate 6 is tighter).
-    #
-    # 20yr rule: the worse the entry geometry, the MORE conviction you need.
-    # Grade D entries are small probes (0.40× size) — require proportionally higher
-    # confidence to justify even that small probe, especially for longer holds.
-    GRADE_D_OVERRIDE_CONF = {
-        "positional": 0.68,   # 3-4 week hold + bad S/R = needs 68%+ conviction
-        "swing":      0.65,   # 3-10 day hold + bad S/R = needs 65%+
-        "intraday":   0.62,   # Gate 6 at 65% is the binding gate for intraday D-entries
-    }
-
-    def _short_quality(self, sup_dist_pct: float, res_dist_pct: float,
-                       res_str: int) -> Tuple[str, float]:
-        """
-        Recompute entry quality for SHORT direction.
-        Near resistance = small res_dist = tight stop above = GOOD.
-        Mirrors _entry_quality() in support_resistance.py with distances swapped.
-        """
-        rr = sup_dist_pct / max(res_dist_pct, 0.1)  # room down / stop up
-        if rr >= 3 and res_dist_pct < 1.5 and res_str >= 3:
-            quality = "A"
-        elif rr >= 2 and res_dist_pct < 2.5:
-            quality = "B"
-        elif rr >= 1.5:
-            quality = "C"
-        else:
-            quality = "D"
-        return quality, round(rr, 2)
 
     def check(
         self,
@@ -117,13 +87,13 @@ class Gate5SRValidator:
         near_resistance = bool(sr_levels.get("near_resistance", False))
         near_breakout   = bool(sr_levels.get("near_breakout", False))
 
-        # S/R engine computes entry_quality from LONG perspective only.
-        # For SHORT, near resistance = tight stop = GOOD — recompute with inverted distances.
+        # GATE5-1: the S/R engine now computes an ATR-relative *runway* grade
+        # for BOTH directions. SHORT uses its own grade; reward_risk is the
+        # real ATR trade R:R (direction-independent), not a recomputed ratio.
         if signal_direction == "SHORT":
-            entry_quality, reward_risk = self._short_quality(sup_dist, res_dist, res_str)
+            entry_quality = sr_levels.get("entry_quality_short", entry_quality)
             logger.debug(
-                f"Gate5 SHORT quality recomputed: {entry_quality} "
-                f"(sup={sup_dist:.1f}% res={res_dist:.1f}% rr={reward_risk:.2f})"
+                f"Gate5 SHORT runway grade: {entry_quality} (rr={reward_risk:.2f})"
             )
 
         # ── Hard R:R floor ────────────────────────────────────────
@@ -190,40 +160,20 @@ class Gate5SRValidator:
             )
             size_mult *= 0.5
 
-        # ── Grade D override ──────────────────────────────────────
-        # In per-category mode: confidence-only gate (alignment is purely
-        # informational; Gate 6's category-specific threshold is the real
-        # confidence gate). In multi-model mode: also require alignment B+.
-        #
-        # Threshold is category-aware: positional (3-4 week hold) needs
-        # more conviction in a Grade-D setup than intraday (< 1 day).
+        # ── Grade D = probe size, NOT a veto (GATE5-1) ────────────
+        # Grade D now means "entering into a near strong wall" — limited
+        # runway, so the trade is a small probe (GRADE_SIZE_MAP D = 0.40×,
+        # already applied above, further shrunk by any near_* penalty).
+        # S/R SIZES the trade; it does not veto it. The conviction gate is
+        # Gate 6's category-specific confidence threshold downstream — Gate 5
+        # no longer re-imposes its own (that double-counted and, on the old
+        # noise grade, blocked ~37% of genuine 2.5:1 trades). Counter-regime
+        # + Grade D remains a hard block in signal_engine/backtest (Rule #21)
+        # — that's a regime safety on probes, independent of this change.
         if entry_quality == "D":
-            grade_d_threshold = self.GRADE_D_OVERRIDE_CONF.get(category, 0.65)
-            conf_ok  = ml_confidence >= grade_d_threshold
-            align_ok = per_category_mode or alignment in ("A+", "A", "B")
-            if conf_ok and align_ok:
-                reasons.append(
-                    f"Grade D entry — allowing at reduced size "
-                    f"(conf={ml_confidence:.0%} ≥ {grade_d_threshold:.0%}"
-                    + (f", per-category [{category}]" if per_category_mode else f", align={alignment}")
-                    + ")"
-                )
-                size_mult = 0.40
-            else:
-                reason_bits = []
-                if not conf_ok:
-                    reason_bits.append(f"conf {ml_confidence:.0%} < {grade_d_threshold:.0%} [{category}]")
-                if not align_ok:
-                    reason_bits.append(f"align {alignment} not B/A/A+")
-                return False, {
-                    "gate":          5,
-                    "passed":        False,
-                    "reason":        "Grade D entry — " + " · ".join(reason_bits),
-                    "entry_quality": entry_quality,
-                    "reward_risk":   reward_risk,
-                    "category":      category,
-                    "size_mult":     0.0,
-                }
+            reasons.append(
+                "Grade D entry (limited runway to ATR target) — probe size"
+            )
 
         # ── Final size cap ────────────────────────────────────────
         size_mult = round(max(0.0, min(1.2, size_mult)), 3)

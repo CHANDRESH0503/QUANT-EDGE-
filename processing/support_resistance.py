@@ -36,6 +36,24 @@ class SupportResistanceEngine:
     # Round number intervals for HDFC Bank price range ~₹1500-2500
     ROUND_INTERVALS = [50, 100]
 
+    # ── ATR-relative entry geometry (GATE5-1) ────────────────────────
+    # The execution layer trades a fixed ATR geometry: stop = 2×ATR,
+    # target = 5×ATR → a real 2.5:1 reward:risk on EVERY trade. The old
+    # reward_risk_sr (nearest_res/nearest_sup) was a ratio of two sub-ATR
+    # noise distances — disconnected from the actual trade — and it
+    # hard-blocked ~37% of genuine 2.5:1 trades at random.
+    #
+    # Fix (Rule #20/#26/#27 superseded): reward_risk_sr = the REAL trade
+    # R:R, so the hard floor never spuriously fires; entry_quality becomes
+    # an ATR-relative *runway* grade used ONLY to modulate SIZE (clear
+    # runway → A/full size, entering into a strong wall → D/probe size).
+    # S/R sizes the trade; it does not veto it.
+    STOP_ATR_MULT    = 2.0   # mirrors PipelineBacktest / exit engine
+    TARGET_ATR_MULT  = 5.0
+    REAL_TRADE_RR    = TARGET_ATR_MULT / STOP_ATR_MULT          # 2.5:1
+    WALL_STRENGTH    = 6     # only high-confluence levels cap the runway
+    ATR_PERIOD       = 14
+
     def get_sr_features(self, df: pd.DataFrame,
                          max_call_oi_strike: float = 0,
                          max_put_oi_strike:  float = 0) -> Dict:
@@ -77,8 +95,15 @@ class SupportResistanceEngine:
         sup_str   = nearest_sup["strength"]  if nearest_sup  else 1
         res_str   = nearest_res["strength"]  if nearest_res  else 1
 
-        # Entry quality: near support + far from resistance = best setup
-        entry_quality = self._entry_quality(sup_dist, res_dist, sup_str, res_str)
+        # ── ATR-relative runway grades (GATE5-1) ──────────────────
+        # entry_quality measures how much CLEAR RUNWAY the trade has to its
+        # ATR target before hitting a strong wall — a size signal, not a veto.
+        # Computed for both directions (SR is direction-agnostic); Gate 5
+        # picks the one matching the signal. reward_risk_sr is the REAL
+        # trade R:R (2.5:1) so the hard floor never fires on S/R noise.
+        atr_pct      = self._atr_pct(df, current)
+        eq_long      = self._runway_grade("LONG",  current, levels, atr_pct)
+        eq_short     = self._runway_grade("SHORT", current, levels, atr_pct)
 
         return {
             # Nearest support
@@ -97,10 +122,18 @@ class SupportResistanceEngine:
             "second_support":        second_sup["price"]  if second_sup  else current * 0.90,
             "second_resistance":     second_res["price"]  if second_res  else current * 1.10,
 
-            # Trade quality
-            "entry_quality":         entry_quality,     # A / B / C / D
-            "entry_quality_score":   self._quality_to_score(entry_quality),
-            "reward_risk_sr":        round(res_dist / max(sup_dist, 0.001), 2),
+            # Trade quality — ATR-relative runway grade (GATE5-1).
+            # entry_quality is the LONG grade (kept as the default field for
+            # backward compatibility); entry_quality_short is the SHORT grade.
+            # Gate 5 selects by signal direction. Both are SIZE signals only.
+            "entry_quality":         eq_long,           # A / B / C / D (LONG)
+            "entry_quality_short":   eq_short,          # A / B / C / D (SHORT)
+            "entry_quality_score":   self._quality_to_score(eq_long),
+            "atr_pct":               round(atr_pct, 4),
+            # Real trade R:R (target 5×ATR / stop 2×ATR). The trade does not
+            # use S/R for execution, so the honest R:R is this constant — not
+            # the old nearest_res/nearest_sup noise ratio.
+            "reward_risk_sr":        round(self.REAL_TRADE_RR, 2),
 
             # Breakout detection
             "near_breakout":         int(res_dist < 0.005 and
@@ -285,35 +318,66 @@ class SupportResistanceEngine:
     def _dist(self, a: float, b: float) -> float:
         return abs(a - b) / max(b, 1)
 
-    def _entry_quality(self, sup_dist: float, res_dist: float,
-                        sup_str: int, res_str: int) -> str:
+    def _atr_pct(self, df: pd.DataFrame, current: float) -> float:
+        """ATR(14) as a fraction of price. 0.0 if not computable."""
+        if len(df) < self.ATR_PERIOD + 1 or current <= 0:
+            return 0.0
+        h, l, c = df["High"], df["Low"], df["Close"]
+        prev_c  = c.shift()
+        tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()],
+                       axis=1).max(axis=1)
+        atr = float(tr.rolling(self.ATR_PERIOD).mean().iloc[-1])
+        if not np.isfinite(atr) or atr <= 0:
+            return 0.0
+        return atr / current
+
+    def _runway_grade(self, direction: str, current: float,
+                      levels: List[Dict], atr_pct: float) -> str:
         """
-        Rate entry quality for a LONG trade:
-        A = near strong support, far from resistance (best R:R)
-        D = near resistance, far from support (worst R:R)
+        ATR-relative entry-quality grade — a SIZE signal, never a veto.
+
+        The trade targets TARGET_ATR_MULT×ATR with a STOP_ATR_MULT×ATR stop.
+        A strong wall (strength ≥ WALL_STRENGTH) between entry and that target
+        caps the realistic reward — so the grade measures how much CLEAR
+        RUNWAY the trade has:
+            A = full runway to the ATR target (R:R ≥ 2.0)
+            B = mild cap                      (R:R ≥ 1.5)
+            C = capped but still positive     (R:R ≥ 1.0)
+            D = entering into a near wall      (R:R < 1.0) → probe size
+        Minor levels do NOT cap a momentum move (it breaks through them);
+        only high-confluence walls count.
         """
-        rr = res_dist / max(sup_dist, 0.001)
-        if rr >= 3 and sup_dist < 0.015 and sup_str >= 3:
-            return "A"
-        elif rr >= 2 and sup_dist < 0.025:
-            return "B"
-        elif rr >= 1.5:
-            return "C"
+        if atr_pct <= 0:
+            return "C"   # neutral grade when ATR unknown → mid size
+        risk = self.STOP_ATR_MULT * atr_pct
+        if direction == "LONG":
+            walls = [(lvl["price"] - current) / current for lvl in levels
+                     if lvl["price"] > current and lvl["strength"] >= self.WALL_STRENGTH]
+        else:
+            walls = [(current - lvl["price"]) / current for lvl in levels
+                     if lvl["price"] < current and lvl["strength"] >= self.WALL_STRENGTH]
+        runway = min([w for w in walls if w > 0], default=99.0)
+        reward = min(self.TARGET_ATR_MULT * atr_pct, runway)
+        rr = reward / max(risk, 1e-9)
+        if   rr >= 2.0: return "A"
+        elif rr >= 1.5: return "B"
+        elif rr >= 1.0: return "C"
         return "D"
 
     def _quality_to_score(self, quality: str) -> float:
         return {"A": 1.0, "B": 0.6, "C": 0.2, "D": -0.2}.get(quality, 0.0)
 
     def _empty_sr(self) -> Dict:
-        # sup_dist=5%, res_dist=5% → rr=1.0 < 1.5 → Grade D (matches _entry_quality math).
-        # Grade D score = -0.2 (from _quality_to_score). Returning "C"/0.2 was inconsistent
-        # with the actual formula and incorrectly promoted low-data entries to Grade C.
+        # <30 bars = no S/R info → Grade D (probe size, 0.40×). Under GATE5-1
+        # S/R never VETOES, so reward_risk_sr is the real trade R:R (2.5) and
+        # the trade passes at reduced size rather than being blocked on no data.
         return {
             "nearest_support": 0, "support_distance_pct": 5.0,
             "support_strength": 1, "near_support": 0,
             "nearest_resistance": 0, "resistance_distance_pct": 5.0,
             "resistance_strength": 1, "near_resistance": 0,
             "second_support": 0, "second_resistance": 0,
-            "entry_quality": "D", "entry_quality_score": -0.2,
-            "reward_risk_sr": 1.0, "near_breakout": 0,
+            "entry_quality": "D", "entry_quality_short": "D",
+            "entry_quality_score": -0.2, "atr_pct": 0.0,
+            "reward_risk_sr": round(self.REAL_TRADE_RR, 2), "near_breakout": 0,
         }

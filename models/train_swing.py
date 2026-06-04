@@ -27,6 +27,7 @@ try:
         accuracy_score, classification_report,
         confusion_matrix, brier_score_loss,
     )
+    from sklearn.utils.class_weight import compute_sample_weight
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -88,6 +89,15 @@ class SwingModelTrainer:
 
     N_SPLITS       = 10    # walk-forward CV folds
     EARLY_STOPPING = 30    # stop if no improvement for 30 rounds
+
+    # Class-balanced sample weights. 25yr of HDFC is a secular uptrend, so
+    # raw priors lean LONG and FLAT dominates — the model defaults to the
+    # majority direction on a sparse/zero input (the CR-1A LONG-bias). Passing
+    # 'balanced' sample_weight equalises the per-class influence so the model
+    # expresses an honest direction; the downstream gates (Gate 5 R:R, Gate 6
+    # threshold) still do the filtering. Calibration is fit UNweighted so the
+    # output probabilities stay true-frequency. Set None to disable.
+    CLASS_BALANCE = "balanced"
 
     def __init__(self, variant: str = "technical", ticker: str = "HDFCBANK.NS"):
         """
@@ -153,9 +163,12 @@ class SwingModelTrainer:
             y_tr, y_val = y.iloc[train_idx],       y.iloc[val_idx]
 
             model = XGBClassifier(**self.PARAMS, early_stopping_rounds=self.EARLY_STOPPING)
+            sw_tr = (compute_sample_weight(self.CLASS_BALANCE, y_tr)
+                     if self.CLASS_BALANCE else None)
             model.fit(
                 X_tr, y_tr,
-                eval_set=[(X_val, y_val)],
+                sample_weight=sw_tr,
+                eval_set=[(X_val, y_val)],   # unweighted → early-stop on real perf
                 verbose=False,
             )
 
@@ -178,8 +191,11 @@ class SwingModelTrainer:
 
         # ── Final model on full dataset ───────────────────────────
         self.model = XGBClassifier(**self.PARAMS)
+        sw = (compute_sample_weight(self.CLASS_BALANCE, y)
+              if self.CLASS_BALANCE else None)
         self.model.fit(
             X_clean[self.features], y,
+            sample_weight=sw,
             verbose=False,
         )
 
@@ -188,11 +204,13 @@ class SwingModelTrainer:
         # This keeps calibration forward-looking (no lookahead).
         cal_brier = None
         try:
-            from models.calibration import PreFitIsotonicCalibrator
+            from models.calibration import make_calibrator
             cal_n = max(50, int(len(X_clean) * 0.15))
             X_cal = X_clean[self.features].iloc[-cal_n:]
             y_cal = y.iloc[-cal_n:]
-            self.calibrated_model = PreFitIsotonicCalibrator(self.model)
+            # Fit on the natural (unweighted) tail so probabilities stay
+            # true-frequency despite the balanced training weights.
+            self.calibrated_model = make_calibrator(self.model, len(y_cal))
             self.calibrated_model.fit(X_cal, y_cal)
             cal_probs = self.calibrated_model.predict_proba(X_cal)[:, 2]  # LONG
             y_bin     = (y_cal == 2).astype(int)

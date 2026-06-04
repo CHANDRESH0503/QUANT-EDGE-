@@ -198,18 +198,21 @@ class TestGate5SRValidator(unittest.TestCase):
         self.assertTrue(passed)
         self.assertGreaterEqual(ctx["size_mult"], 0.9)
 
-    def test_grade_d_blocked_low_conf(self):
+    def test_grade_d_passes_at_probe_size(self):
+        # GATE5-1: Grade D = limited runway to the ATR target → probe size,
+        # NOT a veto. S/R sizes the trade; the conviction gate is Gate 6.
         passed, ctx = self.gate.check(
             self._sr_grade_d(), "LONG", ml_confidence=0.61, alignment="B"
         )
-        self.assertFalse(passed)
+        self.assertTrue(passed)
+        self.assertLessEqual(ctx["size_mult"], 0.40, "Grade D must be probe size")
 
-    def test_grade_d_overridden_high_conf_a_plus(self):
+    def test_grade_d_high_conf_still_probe_size(self):
         passed, ctx = self.gate.check(
             self._sr_grade_d(), "LONG", ml_confidence=0.80, alignment="A+"
         )
         self.assertTrue(passed)
-        self.assertLessEqual(ctx["size_mult"], 0.5, "Grade D override should cap size")
+        self.assertLessEqual(ctx["size_mult"], 0.40, "Grade D is sized small regardless of conf")
 
     def test_poor_rr_reduces_size(self):
         sr = {**self._sr_grade_a(), "reward_risk_sr": 1.4}

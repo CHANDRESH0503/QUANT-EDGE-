@@ -38,6 +38,7 @@
 import numpy as np
 import pandas as pd
 import logging
+from collections import Counter
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -135,6 +136,14 @@ class PipelineBacktest:
         entry:      Dict = {}
         min_history = 60
 
+        # ── Funnel instrumentation (where does every candidate bar die?) ──
+        funnel    = Counter()          # death-point → count
+        dir_count = Counter()          # raw model direction distribution
+        g5_grade  = Counter()          # Gate-5 entry_quality when reached
+        g6_gaps   = []                 # (threshold - conf) for Gate-6 conf fails
+        g5_rr     = []                 # reward_risk seen at Gate 5
+        could_expect = 0               # Gate-6 fails that EDGE-1 *could* rescue
+
         for i in range(min_history, len(df) - forward_days):
             bar    = df.iloc[i]
             price  = float(bar["Close"])
@@ -165,16 +174,20 @@ class PipelineBacktest:
                 conf  = float(probs[pred])
             except Exception as e:
                 logger.debug(f"predict error bar {i}: {e}")
+                funnel["gate4_predict_error"] += 1
                 equity_log.append({"date": date, "equity": round(capital, 2)})
                 continue
             direction = {0: "SHORT", 1: "FLAT", 2: "LONG"}[pred]
+            dir_count[direction] += 1
             if direction == "FLAT":
+                funnel["gate4_FLAT"] += 1
                 equity_log.append({"date": date, "equity": round(capital, 2)})
                 continue
 
             # ── Gate 1: regime (shared classifier + REGIME_RULES) ──
             regime_name, rules = self._regime(feat_row)
             if regime_name == "CHOPPY_SIDEWAYS":
+                funnel["gate1_CHOPPY"] += 1
                 equity_log.append({"date": date, "equity": round(capital, 2)})
                 continue   # Gate 1 hard-blocks CHOPPY for all directions.
 
@@ -185,9 +198,11 @@ class PipelineBacktest:
 
             # Positional hard blocks (signal_engine rules 24 / G1-5).
             if category == "positional" and not regime_match:
+                funnel["positional_counter_regime"] += 1
                 equity_log.append({"date": date, "equity": round(capital, 2)})
                 continue
             if category == "positional" and regime_name == "HIGH_VOLATILITY":
+                funnel["positional_HIGH_VOL"] += 1
                 equity_log.append({"date": date, "equity": round(capital, 2)})
                 continue
 
@@ -201,11 +216,17 @@ class PipelineBacktest:
                 per_category_mode=True,
                 category=category,
             )
+            g5_grade[g5_ctx.get("entry_quality", "?")] += 1
+            g5_rr.append(float(g5_ctx.get("reward_risk", 0.0)))
             if not g5_pass:
+                # Distinguish the R:R hard floor from other Gate-5 rejects.
+                rr = float(g5_ctx.get("reward_risk", 0.0))
+                funnel["gate5_RR_hardfloor" if rr < 0.5 else "gate5_other"] += 1
                 equity_log.append({"date": date, "equity": round(capital, 2)})
                 continue
             # Counter-regime + Grade D double jeopardy (rule 21).
             if not regime_match and g5_ctx.get("entry_quality") == "D":
+                funnel["counter_regime_gradeD"] += 1
                 equity_log.append({"date": date, "equity": round(capital, 2)})
                 continue
 
@@ -228,8 +249,15 @@ class PipelineBacktest:
                 model_type=category,
                 skip_alignment=True,
                 data_quality_boost=cat_boost,
+                # EDGE-1 parity with live (Rule #30/#31): feed Gate-5 geometry so
+                # the expectancy override is exercised offline exactly as live.
+                entry_quality=g5_ctx.get("entry_quality", "C"),
+                reward_risk=float(g5_ctx.get("reward_risk", 0.0)),
             )
             if not g6_pass:
+                thr = float(g6_ctx.get("threshold", 0.0))
+                funnel["gate6_conf"] += 1
+                g6_gaps.append(round(thr - conf, 3))
                 equity_log.append({"date": date, "equity": round(capital, 2)})
                 continue
 
@@ -245,8 +273,10 @@ class PipelineBacktest:
                 g5_ctx.get("entry_quality", "C"), conf, category, rules,
             )
             if entry is None:
+                funnel["open_failed_sizing"] += 1
                 equity_log.append({"date": date, "equity": round(capital, 2)})
                 continue
+            funnel["OPENED"] += 1
             in_trade = True
             if verbose:
                 logger.info(
@@ -273,6 +303,14 @@ class PipelineBacktest:
             "equity_log":        equity_log,
             "metrics":           agg,
             "per_regime_metrics":per_regime,
+            "funnel":            dict(funnel),
+            "diagnostics": {
+                "model_direction_dist": dict(dir_count),
+                "gate5_grade_dist":     dict(g5_grade),
+                "gate5_rr_median":      round(float(np.median(g5_rr)), 2) if g5_rr else None,
+                "gate6_gap_median":     round(float(np.median(g6_gaps)), 3) if g6_gaps else None,
+                "gate6_gap_min":        round(float(np.min(g6_gaps)), 3) if g6_gaps else None,
+            },
             "run_at":            str(datetime.now()),
         }
 

@@ -18,6 +18,7 @@ try:
     from xgboost import XGBClassifier
     from sklearn.model_selection import TimeSeriesSplit
     from sklearn.metrics import accuracy_score, brier_score_loss
+    from sklearn.utils.class_weight import compute_sample_weight
     DEPS_OK = True
 except ImportError:
     DEPS_OK = False
@@ -79,6 +80,13 @@ class IntradayModelTrainer:
     N_SPLITS       = 5    # less splits — less data available
     EARLY_STOPPING = 20
 
+    # Class-balanced sample weights. The 0.4%/30-min threshold makes FLAT the
+    # vast majority of labels, so the unweighted model collapsed to FLAT≈1.0
+    # (it almost never fired → 0 trades in the holdout despite the strongest
+    # AUC). 'balanced' lets it express LONG/SHORT on genuine setups; the
+    # calibrated probability + Gate 6's 65% threshold filter the weak ones.
+    CLASS_BALANCE = "balanced"
+
     def __init__(self, variant: str = "technical", ticker: str = "HDFCBANK.NS"):
         self.variant     = variant
         self.ticker      = ticker
@@ -118,9 +126,12 @@ class IntradayModelTrainer:
             y_tr, y_val = y.iloc[tr_idx],       y.iloc[val_idx]
 
             m = XGBClassifier(**self.PARAMS, early_stopping_rounds=self.EARLY_STOPPING)
+            sw_tr = (compute_sample_weight(self.CLASS_BALANCE, y_tr)
+                     if self.CLASS_BALANCE else None)
             m.fit(
                 X_tr, y_tr,
-                eval_set=[(X_val, y_val)],
+                sample_weight=sw_tr,
+                eval_set=[(X_val, y_val)],   # unweighted → early-stop on real perf
                 verbose=False,
             )
             acc = accuracy_score(y_val, m.predict(X_val))
@@ -130,15 +141,19 @@ class IntradayModelTrainer:
         cv_mean = float(np.mean(fold_scores))
 
         self.model = XGBClassifier(**self.PARAMS)
-        self.model.fit(X_clean[self.features], y, verbose=False)
+        sw = (compute_sample_weight(self.CLASS_BALANCE, y)
+              if self.CLASS_BALANCE else None)
+        self.model.fit(X_clean[self.features], y, sample_weight=sw, verbose=False)
 
         # Calibration on most-recent 15% of data (time-ordered)
         cal_brier = None
         try:
-            from models.calibration import PreFitIsotonicCalibrator
+            from models.calibration import make_calibrator
             cal_n = max(30, int(len(X_clean) * 0.15))
             X_cal, y_cal = X_clean[self.features].iloc[-cal_n:], y.iloc[-cal_n:]
-            self.calibrated_model = PreFitIsotonicCalibrator(self.model)
+            # Fit unweighted so calibrated probs reflect the true (FLAT-heavy)
+            # base rate even though training used balanced weights.
+            self.calibrated_model = make_calibrator(self.model, len(y_cal))
             self.calibrated_model.fit(X_cal, y_cal)
             cal_brier = round(float(brier_score_loss(
                 (y_cal == 2).astype(int),

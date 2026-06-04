@@ -352,6 +352,8 @@ class WalkForwardValidator:
             "total_trades":       metrics.get("total_trades", 0),
             "aggregate_metrics":  metrics,
             "per_regime_metrics": result.get("per_regime_metrics", {}),
+            "funnel":             result.get("funnel", {}),
+            "diagnostics":        result.get("diagnostics", {}),
             "assessment":         assessment,
             "is_deployable":      assessment["deployable"],
             "completed_at":       str(datetime.now()),
@@ -492,6 +494,16 @@ def run_pipeline_holdout(
             f"MaxDD={m.get('max_drawdown_pct',0):.1%} | "
             f"scale={'PASS' if res['scale_gate']['pass'] else 'FAIL'}"
         )
+        # Per-category completion marker (progress while sweeping banks/cats).
+        print(
+            f"✓ {ticker:12s} {cat:11s} DONE — "
+            f"trades={m.get('total_trades',0):3d} "
+            f"WR={m.get('win_rate',0):4.0%} PF={m.get('profit_factor',0):5.2f} "
+            f"Sharpe={m.get('sharpe_ratio',0):6.2f} "
+            f"MaxDD={m.get('max_drawdown_pct',0):6.1%} | "
+            f"scale={'PASS ✅' if res['scale_gate']['pass'] else 'FAIL ❌'}",
+            flush=True,
+        )
 
     report["completed_at"] = str(datetime.now())
     report["scale_ready"]  = all(
@@ -545,6 +557,24 @@ if __name__ == "__main__":
                     f"      └ {reg:16s} n={rm['total_trades']:3d} "
                     f"WR={rm.get('win_rate',0):4.0%} PF={rm.get('profit_factor',0):4.2f}"
                 )
+        # ── Funnel: where every candidate bar died ──
+        funnel = res.get("funnel", {})
+        if funnel:
+            total = sum(funnel.values())
+            order = ["gate4_FLAT", "gate1_CHOPPY", "positional_counter_regime",
+                     "positional_HIGH_VOL", "gate5_RR_hardfloor", "gate5_other",
+                     "counter_regime_gradeD", "gate6_conf", "open_failed_sizing",
+                     "gate4_predict_error", "OPENED"]
+            print(f"      funnel ({total} candidate bars):")
+            for k in order:
+                if funnel.get(k):
+                    pct = 100 * funnel[k] / total
+                    print(f"          {k:26s} {funnel[k]:4d}  ({pct:4.1f}%)")
+            d = res.get("diagnostics", {})
+            print(f"      diag: dir={d.get('model_direction_dist')} "
+                  f"g5_grades={d.get('gate5_grade_dist')} "
+                  f"g5_rr_med={d.get('gate5_rr_median')} "
+                  f"g6_gap_min={d.get('gate6_gap_min')}")
     print("=" * 64)
     print(f"SCALE-READY (all categories pass bar): "
           f"{'YES ✅' if rep.get('scale_ready') else 'NO ❌'}")
