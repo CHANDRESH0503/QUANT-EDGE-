@@ -3303,12 +3303,12 @@ function updatePipeline(d) {
         ? `✓ Grade ${g5Q} · R:R ${g5RR}:1`
         : g5Pass === false
           ? `✗ ${g5Q ? 'Grade '+g5Q+' ' : ''}S/R`
-          : '— model FLAT';
+          : (isFlatCat ? '— model FLAT' : '— blocked');
     const g5TimeTxt   = g5Pass === true
         ? `entry ${g5Q} · R:R ${g5RR}:1`
         : g5Pass === false
           ? (g5.reason || 'S/R fail').substring(0, 60)
-          : 'no direction to validate';
+          : (isFlatCat ? 'no direction to validate' : 'blocked upstream');
     styleStage(`${key}PipeGate05`, `${key}PipeG5Name`, `${key}PipeG5Status`, `${key}PipeG5Time`,
                g5Pass, color, g5StatusTxt, g5TimeTxt);
 
@@ -3317,14 +3317,19 @@ function updatePipeline(d) {
     const g6Pass = g6Has ? !!g6.passed : null;
     const g6Conf = g6.confidence != null ? Math.round(g6.confidence * 100) : confPct;
     const g6Thr  = g6.threshold  != null ? Math.round(g6.threshold * 100)  : 60;
+    // Passed-via-expectancy (EDGE-1): conf is BELOW the P(win) threshold but the
+    // trade is +EV (Grade A/B + R:R ≥ 2:1). Don't print "conf ≥ thr" — it's false.
+    const g6Exp  = g6.expectancy_pass === true && g6Conf < g6Thr;
     const g6StatusTxt = g6Pass === true
-        ? `✓ ${g6Conf}% ≥ ${g6Thr}%`
+        ? (g6Exp ? `✓ EV ${g6Conf}% <${g6Thr}%` : `✓ ${g6Conf}% ≥ ${g6Thr}%`)
         : g6Pass === false
           ? `✗ ${g6Conf}% < ${g6Thr}%`
-          : '— model FLAT';
+          : (isFlatCat ? '— model FLAT' : '— blocked');
     const g6TimeTxt   = g6Pass !== null
-        ? (g6.capital_mode || 'CONF CHECK')
-        : 'no direction to validate';
+        ? (g6Exp
+            ? `expectancy override${g6.expected_R != null ? ' · '+Number(g6.expected_R).toFixed(1)+'R' : ''}`
+            : (g6.capital_mode || 'CONF CHECK'))
+        : (isFlatCat ? 'no direction to validate' : 'blocked upstream');
     styleStage(`${key}PipeGate06`, `${key}PipeG6Name`, `${key}PipeG6Status`, `${key}PipeG6Time`,
                g6Pass, color, g6StatusTxt, g6TimeTxt);
 
