@@ -697,6 +697,18 @@ class FeatureBuilder:
         raw["absorption_flag"]  = float(of_raw.get("absorption_detected", 0))
         raw["gap_pct"]          = float(tech_feats_5m.get("gap_pct",
                                          tech_feats.get("gap_pct", 0)))
+        # Short-term intraday momentum (~last 30 min of 5-min bars), as a price
+        # fraction. Used by the entry-timing gate (STAB-3) to avoid opening a
+        # position directly INTO an adverse immediate move. 0.0 when unavailable
+        # (pre-open / thin data) → entry gate treats it as neutral.
+        try:
+            if df_intraday is not None and len(df_intraday) >= 7:
+                _ic = df_intraday["Close"]
+                raw["intraday_mom_30m"] = float((_ic.iloc[-1] - _ic.iloc[-7]) / _ic.iloc[-7])
+            else:
+                raw["intraday_mom_30m"] = 0.0
+        except Exception:
+            raw["intraday_mom_30m"] = 0.0
 
         # Intraday calendar extras
         raw["is_midweek"]   = cal_feats.get("is_midweek", 0.0)

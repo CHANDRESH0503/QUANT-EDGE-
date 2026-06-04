@@ -446,5 +446,38 @@ class TestSignalStabilizer(unittest.TestCase):
         self.assertEqual(r["committed"], "FLAT")           # never flips LONG→SHORT directly
 
 
+class TestEntryTimingGate(unittest.TestCase):
+    """STAB-3 — don't open into an adverse immediate move."""
+
+    def setUp(self):
+        from signals.signal_engine import SignalEngine
+        # Bind the unbound method without constructing the heavy engine.
+        self.fn = SignalEngine._entry_timing_ok
+        class _Stub:
+            ENTRY_MOM_ATR_FACTOR = 0.4
+            ENTRY_MOM_MIN        = 0.0035
+        self.stub = _Stub()
+
+    def _ok(self, direction, mom, atr_pct=0.02):
+        return self.fn(self.stub, direction, {"intraday_mom_30m": mom}, atr_pct)[0]
+
+    def test_long_into_drop_deferred(self):
+        self.assertFalse(self._ok("LONG", -0.015))   # price dropping 1.5% → defer LONG
+
+    def test_long_with_uptick_ok(self):
+        self.assertTrue(self._ok("LONG", 0.004))      # rising → fine
+
+    def test_short_into_rip_deferred(self):
+        self.assertFalse(self._ok("SHORT", 0.015))    # price ripping up → defer SHORT
+
+    def test_missing_data_allows(self):
+        self.assertTrue(self.fn(self.stub, "LONG", {}, 0.02)[0])   # no mom → neutral → ok
+
+    def test_threshold_is_atr_relative(self):
+        # Same 0.5% drop: deferred for a low-ATR name, allowed for a high-ATR name.
+        self.assertFalse(self._ok("LONG", -0.005, atr_pct=0.005))  # thr floor 0.35% → defer
+        self.assertTrue(self._ok("LONG",  -0.005, atr_pct=0.03))   # thr 1.2% → allowed
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

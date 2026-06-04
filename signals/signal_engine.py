@@ -595,7 +595,17 @@ class SignalEngine:
                 reward_risk=float(g5_ctx.get("reward_risk", 0.0)),
             )
 
-            passed_all = bool(g5_pass and g6_pass)
+            # ── Entry-timing confirmation (STAB-3) ─────────────────
+            # A correct LONG/SHORT still loses fast if opened directly INTO an
+            # adverse intraday move. Defer the entry this cycle when the live
+            # ~30-min tape is clearly against the signal; the DIRECTION stays
+            # committed (STAB-2) and the entry re-checks next cycle.
+            entry_ok, e_mom, e_thr = (True, 0.0, 0.0)
+            if g5_pass and g6_pass:
+                entry_ok, e_mom, e_thr = self._entry_timing_ok(
+                    direction, raw, (atr / current_price) if current_price else 0.0
+                )
+            passed_all = bool(g5_pass and g6_pass and entry_ok)
             per_category[cat] = {
                 "category":     cat,
                 "passed":       passed_all,
@@ -604,12 +614,22 @@ class SignalEngine:
                 "regime_match": regime_match,
                 "gate5":        g5_ctx,
                 "gate6":        g6_ctx,
+                "entry_timing": {"intraday_mom_30m": round(e_mom, 4),
+                                 "adverse_threshold": round(e_thr, 4), "ok": entry_ok},
                 "reason":       None if passed_all else (
-                    g5_ctx.get("reason") if not g5_pass else g6_ctx.get("reason")
+                    g5_ctx.get("reason") if not g5_pass else
+                    g6_ctx.get("reason") if not g6_pass else
+                    f"Entry deferred — 30m intraday move {e_mom:+.2%} against {direction} "
+                    f"(≥{e_thr:.2%} adverse); waiting for a non-adverse entry"
                 ),
             }
 
             if not passed_all:
+                if entry_ok is False and g6_pass:
+                    logger.info(
+                        f"[{self.ticker}] {cat} entry deferred: 30m move "
+                        f"{e_mom:+.2%} against {direction} (thr {e_thr:.2%})"
+                    )
                 continue
 
             # ── Position sizing for this category ──────────────────
@@ -979,6 +999,26 @@ class SignalEngine:
     # ─────────────────────────────────────────────────────────────
     # HELPERS
     # ─────────────────────────────────────────────────────────────
+
+    # Entry-timing gate (STAB-3): block opening INTO an adverse intraday move.
+    # Threshold is ATR-relative (per-bank volatility) with a floor, so it only
+    # trips on a CLEARLY adverse move, not normal chop.
+    ENTRY_MOM_ATR_FACTOR = 0.4     # adverse 30-min move > 0.4×ATR% → defer
+    ENTRY_MOM_MIN        = 0.0035  # …but at least 0.35%
+
+    def _entry_timing_ok(self, direction: str, raw: Dict, atr_pct: float):
+        """
+        Returns (ok, mom_30m, threshold). Defers a LONG opened while price is
+        dropping hard, or a SHORT opened while price is ripping up. Missing
+        intraday data → mom 0.0 → always ok (never over-blocks on thin data).
+        """
+        mom    = float(raw.get("intraday_mom_30m", 0.0) or 0.0)
+        thr    = max(self.ENTRY_MOM_MIN, self.ENTRY_MOM_ATR_FACTOR * max(atr_pct, 0.0))
+        if direction == "LONG"  and mom <= -thr:
+            return False, mom, thr
+        if direction == "SHORT" and mom >=  thr:
+            return False, mom, thr
+        return True, mom, thr
 
     def _flat(
         self,
