@@ -963,6 +963,13 @@ class FeatureBuilder:
         # learn regime-conditional predictions without requiring the HMM at train time.
         _regime_series = self._compute_bulk_regime_features(tech_df)
 
+        # Price-derived alpha features across full history (ALPHA-1) — these are
+        # fed real values live but were trained as constant zeros (a CR-1A-class
+        # train/inference skew). Compute them historically so the model learns
+        # them. Definitions match the live build_all computation for parity.
+        _atr_pct_series = self._atr_percentile_series(tech_df)
+        _breadth_series = self._historical_breadth_series(df.index)
+
         # Align feature rows with valid label indices
         rows   = []
         labels = []
@@ -973,6 +980,10 @@ class FeatureBuilder:
                 # Attach per-bar regime features
                 regime_row = _regime_series.iloc[i].to_dict()
                 row.update(regime_row)
+
+                # Attach per-bar price-derived alpha features (ALPHA-1).
+                row["atr_percentile_252"]    = float(_atr_pct_series.iloc[i])
+                row["banks_above_50dma_pct"] = float(_breadth_series.iloc[i])
 
                 # Attach per-bar FII features for full_history when data exists
                 bar_idx  = df.index[i]
@@ -1083,6 +1094,53 @@ class FeatureBuilder:
             return df
         except Exception:
             return df
+
+    def _atr_percentile_series(self, tech_df: pd.DataFrame) -> pd.Series:
+        """
+        Per-bar rolling-252 percentile rank of ATR (volatility regime), matching
+        the live build_all computation exactly (percentile of the current ATR
+        within the trailing 252 bars). Backward-looking — no lookahead.
+        Wired into training so the model learns this alpha instead of seeing it
+        as a constant zero at train time while getting real values live (ALPHA-1).
+        """
+        col = "atr_14" if "atr_14" in tech_df.columns else (
+              "atr" if "atr" in tech_df.columns else None)
+        if col is None:
+            return pd.Series(0.5, index=tech_df.index)
+        pct = tech_df[col].rolling(252, min_periods=20).apply(
+            lambda x: float((x <= x[-1]).sum()) / len(x), raw=True
+        )
+        return pct.fillna(0.5).clip(0.0, 1.0)
+
+    def _historical_breadth_series(self, index: pd.Index) -> pd.Series:
+        """
+        Per-date fraction of the 5-bank universe trading above its 50-day SMA
+        (sector breadth) — the historical analogue of `_universe_above_50dma`.
+        Each bank's daily close is fetched once and forward-filled onto `index`
+        (ffill → no lookahead). Banks without data on a date are simply excluded
+        from that date's fraction. Wired into training to fix the same
+        real-live-but-trained-zero skew (ALPHA-1).
+        """
+        try:
+            from config import TradingConfig
+            above = total = None
+            for t in TradingConfig.UNIVERSE:
+                try:
+                    d = self.price_fetcher.__class__(t).get_daily(start="2000-01-01")
+                    if d is None or d.empty:
+                        continue
+                    c     = d["Close"]
+                    a     = (c > c.rolling(50).mean()).astype(float).reindex(index, method="ffill")
+                    ones  = a.notna().astype(float)
+                    above = a   if above is None else above.add(a,   fill_value=0)
+                    total = ones if total is None else total.add(ones, fill_value=0)
+                except Exception:
+                    continue
+            if above is None or total is None:
+                return pd.Series(0.5, index=index)
+            return (above / total.replace(0, np.nan)).fillna(0.5).clip(0.0, 1.0)
+        except Exception:
+            return pd.Series(0.5, index=index)
 
     def _compute_bulk_regime_features(self, tech_df: pd.DataFrame) -> pd.DataFrame:
         """
